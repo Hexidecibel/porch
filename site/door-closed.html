@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<!--
+  The page frps answers with when a tunnel name has no live door
+  (frps.toml custom404Page). frps serves it on the dead host itself, where
+  /__porch-assets/ is a 404 as well, so everything is inline: bin/deploy
+  replaces the PORCH_FONTS marker with @font-face rules carrying the woff2
+  files as data: URIs, and site_render swaps in the configured panel host.
+  Night only, on purpose: the subject is a porch with its light off.
+  "Ask to reopen": the visitor can ask the owner (POST to the landing host's
+  /api/reopen-requests, statusserver; text/plain JSON, so no preflight). The
+  owner gets a Pocket notification; this page polls, the light flickers on
+  when they allow it, and it reloads into the door. All text goes in with
+  textContent.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<title>Door closed · Porch</title>
+<style>
+/*PORCH_FONTS*/
+:root {
+  --ground: #121014; --surface: #1B181E; --line: #2C2630;
+  --text: #F3ECE4; --muted: #A79E95; --faint: #6F6670;
+  --light: #F5A524; --light-off: #3A2F22; --house: #4A424F;
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --body: "Geist", "Segoe UI", system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--ground); color: var(--text);
+  font: 16px/1.6 var(--body);
+  display: flex; flex-direction: column;
+  padding: max(24px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+           max(24px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+}
+main {
+  flex: 1; width: 100%; max-width: 560px; margin: 0 auto;
+  display: flex; flex-direction: column; justify-content: center; gap: 28px;
+}
+
+/* the scene: the house mark, its dead lamp, a halo that sputters, two moths */
+.scene {
+  position: relative; width: 168px; height: 168px; margin-bottom: 4px;
+  border: 0; padding: 0; background: none; cursor: pointer; color: var(--house);
+  -webkit-tap-highlight-color: transparent;
+}
+.scene:focus-visible { outline: 2px solid var(--light); outline-offset: 8px; border-radius: 12px; }
+.scene svg { position: relative; width: 100%; height: 100%; overflow: visible; }
+.scene .line { fill: none; stroke: currentColor; stroke-width: 4.5; stroke-linecap: round; stroke-linejoin: round; }
+.scene .lamp { fill: var(--light-off); transition: fill .08s; }
+.halo {
+  position: absolute; left: 50%; top: 34.4%; width: 150px; height: 150px;
+  margin: -75px 0 0 -75px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(245,165,36,.42) 0%, rgba(245,165,36,.10) 38%, rgba(245,165,36,0) 68%);
+  opacity: 0;
+}
+.moth {
+  position: absolute; left: 50%; top: 34.4%; width: 4px; height: 3px; margin: -1.5px 0 0 -2px;
+  border-radius: 50%; background: #CFC6BB; opacity: .55; pointer-events: none;
+}
+.moth.a { animation: orbit-a 9s linear infinite; }
+.moth.b { animation: orbit-b 13s linear infinite; opacity: .35; }
+@keyframes orbit-a {
+  from { transform: rotate(0deg) translateX(30px) rotate(0deg) scaleX(1.6); }
+  to   { transform: rotate(360deg) translateX(30px) rotate(-360deg) scaleX(1.6); }
+}
+@keyframes orbit-b {
+  from { transform: rotate(140deg) translateX(46px) translateY(6px) scaleX(1.4); }
+  to   { transform: rotate(-220deg) translateX(46px) translateY(6px) scaleX(1.4); }
+}
+/* every few seconds the light tries, and fails */
+.scene .lamp { animation: lamp 7s steps(1, end) infinite; }
+.halo { animation: halo 7s steps(1, end) infinite; }
+@keyframes lamp {
+  0%, 88%, 100% { fill: var(--light-off); }
+  89% { fill: var(--light); } 90% { fill: var(--light-off); }
+  92% { fill: var(--light); } 93.5% { fill: var(--light-off); }
+  95% { fill: #C78418; } 96% { fill: var(--light-off); }
+}
+@keyframes halo {
+  0%, 88%, 100% { opacity: 0; }
+  89% { opacity: .9; } 90% { opacity: 0; }
+  92% { opacity: 1; } 93.5% { opacity: 0; }
+  95% { opacity: .45; } 96% { opacity: 0; }
+}
+/* a tap makes it try right now */
+.scene.try .lamp { animation: lamp-try 1.3s steps(1, end) 1; }
+.scene.try .halo { animation: halo-try 1.3s steps(1, end) 1; }
+@keyframes lamp-try {
+  0% { fill: var(--light); } 12% { fill: var(--light-off); } 22% { fill: var(--light); }
+  48% { fill: #C78418; } 56% { fill: var(--light-off); } 70% { fill: var(--light); }
+  78%, 100% { fill: var(--light-off); }
+}
+@keyframes halo-try {
+  0% { opacity: 1; } 12% { opacity: 0; } 22% { opacity: 1; }
+  48% { opacity: .45; } 56% { opacity: 0; } 70% { opacity: .9; }
+  78%, 100% { opacity: 0; }
+}
+
+.where {
+  font: 500 13px/1.4 var(--mono); color: var(--light); letter-spacing: .02em;
+  overflow-wrap: anywhere;
+}
+h1 {
+  font: 700 clamp(34px, 9vw, 52px)/1.02 var(--display); letter-spacing: -.02em;
+  margin: 10px 0 0; text-wrap: balance;
+}
+.lede { margin: 0; color: var(--muted); font-size: 17px; max-width: 46ch; }
+.ways { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.way {
+  display: grid; grid-template-columns: 9.5em 1fr; gap: 6px 18px;
+  padding: 16px 0; border-bottom: 1px solid var(--line);
+}
+.way b { font-weight: 500; font-size: 15px; color: var(--text); }
+.way p { margin: 0; color: var(--muted); font-size: 15px; }
+.way a { color: var(--light); text-decoration: none; font-weight: 500; }
+.way a:hover, .way a:focus-visible { text-decoration: underline; text-underline-offset: 3px; outline: none; }
+/* ask the owner to reopen */
+.ask {
+  display: flex; flex-direction: column; gap: 14px; padding: 20px;
+  border: 1px solid var(--line); border-radius: 16px;
+  background: linear-gradient(180deg, rgba(245,165,36,.06), rgba(245,165,36,0) 60%), var(--surface);
+}
+.ask h2 { margin: 0; font: 700 21px/1.2 var(--display); letter-spacing: -.01em; }
+.ask p { margin: 0; color: var(--muted); font-size: 15px; }
+.ask label { font-size: 13px; color: var(--muted); }
+.ask label span { color: var(--faint); }
+.ask-row { display: flex; gap: 10px; margin-top: 6px; }
+.ask input {
+  flex: 1 1 auto; min-width: 0; height: 48px; padding: 0 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--ground); color: var(--text);
+  font: 400 16px var(--body); outline: none;
+}
+.ask input::placeholder { color: var(--faint); }
+.ask input:focus-visible { border-color: var(--light); box-shadow: 0 0 0 3px rgba(245,165,36,.18); }
+.ask button {
+  flex: none; height: 48px; min-width: 44px; padding: 0 20px; border-radius: 12px; border: 0;
+  background: var(--light); color: #1B1206; font: 600 16px var(--body); cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.ask button.ghost { background: transparent; color: var(--light); border: 1px solid rgba(245,165,36,.45); align-self: flex-start; }
+.ask button:disabled { opacity: .55; cursor: default; }
+.ask button:focus-visible { outline: 2px solid var(--light); outline-offset: 3px; }
+.status { display: flex; gap: 12px; align-items: flex-start; font-size: 16px; color: var(--text); }
+.status .dot {
+  flex: none; width: 10px; height: 10px; margin-top: 8px; border-radius: 50%;
+  background: var(--light-off); box-shadow: 0 0 0 0 rgba(245,165,36,0);
+}
+.status small { display: block; color: var(--muted); font-size: 14px; margin-top: 2px; }
+[data-ask="waiting"] .status .dot { background: #C78418; animation: wait 2.4s ease-in-out infinite; }
+[data-ask="approved"] .status .dot { background: var(--light); box-shadow: 0 0 12px 2px rgba(245,165,36,.6); }
+[data-ask="denied"] .status .dot, [data-ask="expired"] .status .dot, [data-ask="error"] .status .dot { background: var(--house); }
+@keyframes wait { 0%, 100% { opacity: .35; } 50% { opacity: 1; box-shadow: 0 0 10px 1px rgba(245,165,36,.45); } }
+/* waiting: the lamp warms a little; approved: it catches and stays on */
+[data-ask="waiting"] .scene .lamp { animation: warm 2.4s ease-in-out infinite; }
+[data-ask="waiting"] .halo { animation: warm-halo 2.4s ease-in-out infinite; }
+@keyframes warm { 0%, 100% { fill: var(--light-off); } 50% { fill: #6A4A1C; } }
+@keyframes warm-halo { 0%, 100% { opacity: 0; } 50% { opacity: .18; } }
+[data-ask="approved"] .scene .lamp { animation: catch 1.4s steps(1, end) 1 forwards; fill: var(--light); }
+[data-ask="approved"] .halo { animation: catch-halo 1.4s steps(1, end) 1 forwards; opacity: 1; }
+@keyframes catch {
+  0% { fill: var(--light); } 10% { fill: var(--light-off); } 22% { fill: var(--light); }
+  34% { fill: var(--light-off); } 44% { fill: #C78418; } 52% { fill: var(--light-off); } 64%, 100% { fill: var(--light); }
+}
+@keyframes catch-halo {
+  0% { opacity: 1; } 10% { opacity: 0; } 22% { opacity: 1; } 34% { opacity: 0; }
+  44% { opacity: .5; } 52% { opacity: 0; } 64%, 100% { opacity: 1; }
+}
+[data-ask="approved"] .moth { display: none; }
+footer {
+  max-width: 560px; width: 100%; margin: 28px auto 0; display: flex; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; font: 400 12px var(--mono); color: var(--faint);
+}
+@media (max-width: 480px) {
+  .way { grid-template-columns: 1fr; }
+  .ask { padding: 18px 16px; }
+  .ask-row { flex-direction: column; }
+  .ask button { width: 100%; }
+  .scene { width: 136px; height: 136px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scene .lamp, .halo, .moth, .scene.try .lamp, .scene.try .halo,
+  [data-ask] .scene .lamp, [data-ask] .halo, .status .dot { animation: none !important; }
+  .moth { display: none; }
+}
+</style>
+</head>
+<body>
+<main>
+  <div class="scene-wrap">
+    <button class="scene" id="scene" type="button" aria-label="The porch light is off. Tap to flick the switch.">
+      <span class="halo" aria-hidden="true"></span>
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <path class="line" d="M8 30 L32 10 L56 30"/>
+        <path class="line" d="M16 28 V54 H48 V28"/>
+        <path class="line" d="M27 54 V40 H37 V54"/>
+        <circle class="lamp" cx="32" cy="22" r="5.5"/>
+      </svg>
+      <span class="moth a" aria-hidden="true"></span>
+      <span class="moth b" aria-hidden="true"></span>
+    </button>
+    <div class="where" id="where">this door</div>
+    <h1>The porch light is off.</h1>
+  </div>
+  <p class="lede" id="lede">Nobody's answering at this door. Doors on a porch open for a while and then close again: this one expired, was used up, or was never opened.</p>
+  <section class="ask" id="ask" aria-labelledby="askTitle">
+    <h2 id="askTitle">Someone sent you this?</h2>
+    <p id="askText">Ask them to open it again. They get a note on their phone, and this page comes back by itself when they do.</p>
+    <form id="askForm" novalidate>
+      <label for="note">Your name <span>(optional, so they know who's asking)</span></label>
+      <div class="ask-row">
+        <input id="note" name="note" maxlength="40" autocomplete="name" autocapitalize="words" enterkeyhint="send" spellcheck="false" placeholder="e.g. Sam">
+        <button type="submit" id="askBtn">Ask to reopen</button>
+      </div>
+    </form>
+    <div class="status" id="status" role="status" aria-live="polite" hidden>
+      <span class="dot" aria-hidden="true"></span><span><span id="statusText"></span><small id="statusSub"></small></span>
+    </div>
+    <button type="button" class="ghost" id="again" hidden>Ask again</button>
+  </section>
+  <div class="ways">
+    <div class="way"><b>It's your door?</b><p><a href="https://panel.cush.rocks/">Bring it back from your panel</a>. Closed doors wait under Recent, ready to reopen.</p></div>
+  </div>
+</main>
+<footer><span>404 · no door at this address</span><span>Porch</span></footer>
+<script>
+(function () {
+  var host = (location.hostname || '').toLowerCase();
+  if (host) document.getElementById('where').textContent = host;
+  var scene = document.getElementById('scene');
+  var timer = null;
+  scene.addEventListener('click', function () {
+    scene.classList.remove('try');
+    void scene.offsetWidth;            // restart the animation on repeat taps
+    scene.classList.add('try');
+    clearTimeout(timer);
+    timer = setTimeout(function () { scene.classList.remove('try'); }, 1400);
+  });
+
+  // ---- ask the owner to reopen ----
+  var API = 'https://tunnel.cush.rocks/api/reopen-requests';
+  var KEY = 'porch-ask:' + host;
+  var WAIT_MS = 31 * 60 * 1000;
+  var root = document.documentElement;
+  var form = document.getElementById('askForm');
+  var note = document.getElementById('note');
+  var btn = document.getElementById('askBtn');
+  var again = document.getElementById('again');
+  var status = document.getElementById('status');
+  var pollTimer = null;
+
+  function remember(v) {
+    try { if (v) sessionStorage.setItem(KEY, JSON.stringify(v)); else sessionStorage.removeItem(KEY); } catch (e) {}
+  }
+  function recall() {
+    try { var v = JSON.parse(sessionStorage.getItem(KEY) || 'null'); return v && v.id && v.token ? v : null; } catch (e) { return null; }
+  }
+  function show(state, text, sub) {
+    root.setAttribute('data-ask', state);
+    form.hidden = state !== 'idle' && state !== 'error';
+    status.hidden = state === 'idle';
+    document.getElementById('statusText').textContent = text || '';
+    document.getElementById('statusSub').textContent = sub || '';
+    again.hidden = !(state === 'denied' || state === 'expired');
+    var asking = state === 'idle' || state === 'error' || state === 'asking';
+    document.getElementById('askText').hidden = !asking;
+    document.getElementById('askTitle').textContent = asking ? 'Someone sent you this?' : 'You asked the owner';
+    btn.disabled = state === 'asking';
+    btn.textContent = state === 'asking' ? 'Asking\u2026' : 'Ask to reopen';
+  }
+  function poll(ask) {
+    clearTimeout(pollTimer);
+    if (Date.now() - ask.t > WAIT_MS) { done('expired'); return; }
+    fetch(API + '/' + encodeURIComponent(ask.id) + '?t=' + encodeURIComponent(ask.token),
+          { credentials: 'omit', cache: 'no-store' })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return [r.status, j]; }); })
+      .then(function (res) {
+        var st = res[1] && res[1].state;
+        if (res[0] === 404) { done('expired'); return; }
+        if (st === 'approved' || st === 'denied' || st === 'expired') { done(st); return; }
+        pollTimer = setTimeout(function () { poll(ask); }, ((res[1] && res[1].poll) || 4) * 1000);
+      })
+      .catch(function () { pollTimer = setTimeout(function () { poll(ask); }, 8000); });
+  }
+  function done(state) {
+    remember(null);
+    if (state === 'approved') {
+      document.querySelector('h1').textContent = 'The porch light is on.';
+      document.getElementById('lede').textContent = 'Someone\u2019s home: the door is open again.';
+      show('approved', 'The owner opened the door.', 'Coming in\u2026');
+      comeIn(0);
+    } else if (state === 'denied') {
+      show('denied', 'The owner said not now.', 'Maybe ask them another way, or try again later.');
+    } else {
+      show('expired', 'No answer yet.', 'They may be away. You can ask again in a while.');
+    }
+  }
+  // The door takes a moment to come back through the tunnel: wait until this
+  // address stops answering with this page (404), then load it.
+  function comeIn(n) {
+    setTimeout(function () {
+      fetch(location.href, { method: 'HEAD', cache: 'no-store', credentials: 'same-origin' })
+        .then(function (r) { if (r.status !== 404 || n > 25) location.reload(); else comeIn(n + 1); })
+        .catch(function () { if (n > 25) location.reload(); else comeIn(n + 1); });
+    }, n ? 1000 : 1600);
+  }
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (btn.disabled) return;
+    show('asking', '', '');
+    fetch(API, {
+      method: 'POST', mode: 'cors', credentials: 'omit', cache: 'no-store',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ host: host, note: note.value.slice(0, 40) })
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (r.status === 201 && j.id && j.token) {
+          var ask = { id: String(j.id), token: String(j.token), t: Date.now() };
+          remember(ask);
+          show('waiting', 'Asked. Waiting for the owner\u2026', 'Keep this page open; it comes back by itself.');
+          pollTimer = setTimeout(function () { poll(ask); }, ((j.poll || 4) * 1000));
+        } else if (r.status === 429 || r.status === 503) {
+          show('error', 'Too many asks right now.', 'Try again in a while.');
+        } else {
+          show('error', 'This page can\u2019t ask from here.', 'Ask the person who sent you the link.');
+        }
+      });
+    }).catch(function () {
+      show('error', 'Couldn\u2019t reach the porch.', 'Check your connection and try again.');
+    });
+  });
+  again.addEventListener('click', function () { show('idle'); note.focus(); });
+  var pending = recall();
+  if (pending && Date.now() - pending.t < WAIT_MS) {
+    show('waiting', 'Asked. Waiting for the owner\u2026', 'Keep this page open; it comes back by itself.');
+    poll(pending);
+  } else {
+    show('idle');
+  }
+})();
+</script>
+</body>
+</html>

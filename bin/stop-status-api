@@ -1,0 +1,21 @@
+#!/bin/bash
+# Stop the tunnel status API server
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+PID_FILE="$TUNNEL_DIR/logs/status-api.pid"
+LEGACY_PID_FILE="/tmp/tunnel-status-api.pid"
+
+# Only ever signal a PID that is confirmed to be the status server. The old
+# code kill'd whatever number was in a fixed /tmp path — a stale file whose PID
+# had been recycled took an unrelated process with it.
+live_pids="$(cush_pids_for 'python*' 'statusserver.py')"
+
+if [ -n "$live_pids" ]; then
+    echo "Stopping status API (PID: $(echo "$live_pids" | tr '\n' ' '))..."
+    for pid in $live_pids; do kill "$pid" 2>/dev/null; done
+    rm -f "$PID_FILE" "$LEGACY_PID_FILE"
+    echo "Stopped."
+else
+    rm -f "$PID_FILE" "$LEGACY_PID_FILE"
+    echo "Status API is not running."
+fi

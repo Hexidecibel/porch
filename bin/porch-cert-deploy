@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# porch-cert-deploy: certbot deploy hook for porch certificates.
+#
+# certbot (run unprivileged by `porch cert`, see lib/porch_setup/acme.py)
+# calls this with RENEWED_LINEAGE=<config-dir>/live/<cert-name> after each
+# issue or renewal. It writes the HAProxy combined PEM (fullchain + private
+# key) to $PORCH_CERT_DIR/<cert-name>.pem (default ~/.local/share/porch/certs),
+# 0600 from the moment it exists and swapped in atomically, then reloads
+# HAProxy. HAProxy reads its crt files as root at load time, so a 0600 file
+# owned by the porch user is enough and no other account can read the key.
+#
+# Reload: the same safe path as bin/certbot-deploy-hook (non-blocking reload,
+# then a bounded blocking reload, never a restart). Unprivileged it goes
+# through `sudo -n`, which needs this sudoers line (porch setup shows it):
+#   <user> ALL=(root) NOPASSWD: /usr/bin/systemctl reload haproxy, /usr/bin/systemctl reload haproxy --no-block
+# PORCH_CERT_RELOAD=0 skips the reload (tests, or HAProxy not installed yet).
+# Generalizes bin/certbot-deploy-hook, which stays for the legacy lineages.
+
+LINEAGE="${RENEWED_LINEAGE:?RENEWED_LINEAGE not set - certbot runs this as a --deploy-hook}"
+NAME="$(basename "$LINEAGE")"
+CERT_DIR="${PORCH_CERT_DIR:-$HOME/.local/share/porch/certs}"
+OUT="${CERT_DIR}/${NAME}.pem"
+
+for f in fullchain.pem privkey.pem; do
+  if [[ ! -r "${LINEAGE}/${f}" ]]; then
+    echo "porch-cert-deploy: ${LINEAGE}/${f} is missing or unreadable" >&2
+    exit 1
+  fi
+done
+
+( umask 077; mkdir -p "$CERT_DIR" )
+chmod 0700 "$CERT_DIR"
+if [[ -L "$OUT" ]]; then
+  echo "porch-cert-deploy: refusing to write through a symlink at ${OUT}" >&2
+  exit 1
+fi
+
+TMP="$(umask 077; mktemp "${CERT_DIR}/.${NAME}.pem.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+cat "${LINEAGE}/fullchain.pem" "${LINEAGE}/privkey.pem" > "$TMP"
+chmod 0600 "$TMP"
+mv -f "$TMP" "$OUT"
+trap - EXIT
+echo "porch-cert-deploy: wrote ${OUT}"
+
+if [[ "${PORCH_CERT_RELOAD:-1}" == "0" ]]; then
+  echo "porch-cert-deploy: PORCH_CERT_RELOAD=0, not reloading HAProxy"
+  exit 0
+fi
+
+SUDO=()
+if [[ "$(id -u)" != "0" ]]; then
+  SUDO=(sudo -n)
+fi
+if "${SUDO[@]}" systemctl reload haproxy --no-block 2>/dev/null \
+   || timeout 15s "${SUDO[@]}" systemctl reload haproxy; then
+  echo "porch-cert-deploy: HAProxy reloaded"
+else
+  echo "porch-cert-deploy: HAProxy reload failed; the new PEM is in place, reload it by hand:" >&2
+  echo "  sudo systemctl reload haproxy" >&2
+  exit 1
+fi

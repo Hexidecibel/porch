@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#
+# haproxy-porch — apply the porch_host rollout steps to the live HAProxy config.
+#
+# Usage: bin/haproxy-porch a [--dry-run] [--yes]   route /__porch/ to cush-auth on every host
+#        bin/haproxy-porch b [--dry-run] [--yes]   stop forwarding cush_auth to *.tunnel.cush.rocks
+#        bin/haproxy-porch c [--dry-run] [--yes]   honour public paths (cush-public*.map)
+#        bin/haproxy-porch d [--dry-run] [--yes]   Porch error pages + errorfile 429 (bin/haproxy-errors)
+#
+# Each step edits a copy of /etc/haproxy/haproxy.cfg and hands it to
+# bin/haproxy-apply (validate, diff, back up, reload, roll back on failure).
+# Steps are idempotent. See config/haproxy-porch.snippet.cfg for the why.
+# Apply step b only after `bin/porch-auth-check` passes and you have signed in
+# ("Owner? Sign in") on the tunnel apps you use. Step c needs the two public
+# maps in the live maps dir: run bin/auth-deploy first (the auth server makes them).
+# PORCH_HAPROXY_CFG=<file> works on another config (tests; --dry-run only).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+STEP="${1:-}"; shift || true
+DRY=""; YES=""
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY=1 ;;
+        --yes) YES=--yes ;;
+        *) echo "unknown argument: $a" >&2; exit 2 ;;
+    esac
+done
+if [[ "$STEP" == d ]]; then
+    exec "$SCRIPT_DIR/haproxy-errors" ${DRY:+--dry-run} $YES
+fi
+[[ "$STEP" == a || "$STEP" == b || "$STEP" == c ]] || { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+source "$SCRIPT_DIR/../lib/porch-config.sh"
+SUDO=sudo
+if [[ -n "${PORCH_HAPROXY_CFG:-}" ]]; then
+    [[ -n "$DRY" ]] || { echo "PORCH_HAPROXY_CFG works with --dry-run only" >&2; exit 2; }
+    SUDO=""
+    cat "$PORCH_HAPROXY_CFG" > "$TMP/live.cfg"
+else
+    sudo cat /etc/haproxy/haproxy.cfg > "$TMP/live.cfg"
+fi
+
+PYTHONPATH="$SCRIPT_DIR/../lib" python3 - "$STEP" "$TMP/live.cfg" "$TMP/candidate.cfg" "$PORCH_AUTH_HOST" <<'EOF'
+import os, re, string, sys
+step, src, dst, auth_host = sys.argv[1:]
+lines = open(src).read().split("\n")
+
+def find(pred, what):
+    hits = [i for i, l in enumerate(lines) if pred(l)]
+    if len(hits) != 1:
+        sys.exit(f"✗ expected exactly one {what}, found {len(hits)}")
+    return hits[0]
+
+if step == "a":
+    if any(l.strip() == "acl porch_path path_beg /__porch/" for l in lines):
+        print("step a already applied")
+    else:
+        i = find(lambda l: l.strip() == f"acl host_auth hdr(host) -i {auth_host}", "host_auth acl")
+        lines.insert(i + 1, "\tacl porch_path path_beg /__porch/")
+        i = find(lambda l: l.strip() == "use_backend cush_auth if host_auth", "host_auth use_backend")
+        lines.insert(i + 1, "\tuse_backend cush_auth if porch_path")
+        i = find(lambda l: l.strip().startswith(f"http-request redirect code 302 location https://{auth_host}/login?rd=")
+                 and " if needs_auth " in l, "forward-auth redirect")
+        if "!porch_path" not in lines[i]:
+            lines[i] = lines[i].rstrip() + " !porch_path"
+elif step == "c":
+    # The lines come from config/templates/haproxy.cfg.tmpl itself, so the
+    # live file and `porch render haproxy --against` agree afterwards.
+    from porch_setup import render
+    if not any(l.strip() == "acl porch_path path_beg /__porch/" for l in lines):
+        sys.exit("✗ apply step a first")
+    if any("cush-public.map" in l for l in lines) or any("public_ok" in l for l in lines):
+        print("step c already applied")
+    else:
+        i = find(lambda l: l.strip().startswith("acl needs_auth ") and "cush-protected.map" in l,
+                 "needs_auth acl")
+        m = re.search(r"map_str\((\S+)/cush-protected\.map\)", lines[i])
+        if not m:
+            sys.exit("✗ cannot read the maps dir from the needs_auth acl")
+        maps_dir = m.group(1)
+        missing = [n for n in ("cush-public.map", "cush-public-exact.map")
+                   if not os.path.isfile(os.path.join(maps_dir, n))]
+        if missing:
+            sys.exit(f"✗ {', '.join(missing)} missing in {maps_dir}: run bin/auth-deploy first "
+                     "(the auth server creates them, empty)")
+        frags = render.fragments()
+        sub = lambda t: string.Template(t).safe_substitute(maps_dir=maps_dir)
+        acl_tpl = frags["gate_acls"].rstrip("\n").split("\n")
+        k = next(n for n, l in enumerate(acl_tpl) if l.strip().startswith("acl needs_auth "))
+        acl_new = [sub(l) for l in acl_tpl[k + 1:]]
+        gate_tpl = frags["gate"].rstrip("\n").split("\n")
+        a = next(n for n, l in enumerate(gate_tpl) if "set-var(txn.cush_host)" in l)
+        b = next(n for n, l in enumerate(gate_tpl) if "set-var(txn.cush_id)" in l)
+        var_new = gate_tpl[a + 1:b]
+        if not acl_new or len(var_new) != 3:
+            sys.exit("✗ the template does not have the public-path lines")
+        lines[i + 1:i + 1] = acl_new
+        i = find(lambda l: l.strip() == "http-request set-var(txn.cush_host) hdr(host),lower",
+                 "cush_host set-var")
+        lines[i + 1:i + 1] = var_new
+        hdr = [n for n, l in enumerate(lines)
+               if re.match(r"\s*http-request set-header X-Cush-(Device|Role|Device-Name) ", l)]
+        if len(hdr) != 3 or not all(lines[n].rstrip().endswith(" !tunnel") for n in hdr):
+            sys.exit(f"✗ expected 3 X-Cush-* set-header lines ending in !tunnel, found {len(hdr)}; "
+                     "edit by hand (see config/haproxy-porch.snippet.cfg)")
+        for n in hdr:
+            lines[n] = lines[n].rstrip() + " !public_ok"
+        i = find(lambda l: l.strip().startswith(f"http-request redirect code 302 location https://{auth_host}/login?rd=")
+                 and " if needs_auth " in l, "forward-auth redirect")
+        if not lines[i].rstrip().endswith(" !porch_path"):
+            sys.exit("✗ the forward-auth redirect does not end in !porch_path; edit by hand")
+        lines[i] = lines[i].rstrip() + " !public_ok"
+else:
+    if not any(l.strip() == "acl porch_path path_beg /__porch/" for l in lines):
+        sys.exit("✗ apply step a first")
+    n = 0
+    for i, l in enumerate(lines):
+        if "cush_auth=" in l or ("req.fhdr" in l and "Cookie" in l and "tunnelroot" in l):
+            new = l.replace(" !tunnelroot !tunnel", " !tunnelroot").replace("|| tunnelroot || tunnel", "|| tunnelroot")
+            if new != l:
+                lines[i] = new; n += 1
+    if n == 0:
+        print("step b already applied (no tunnel exemptions left)")
+    elif n != 7:
+        sys.exit(f"✗ expected to edit 7 cookie-strip rules, matched {n}; edit by hand (see config/haproxy-porch.snippet.cfg)")
+open(dst, "w").write("\n".join(lines))
+EOF
+
+if [[ -n "$DRY" ]]; then
+    diff -u "$TMP/live.cfg" "$TMP/candidate.cfg" || true
+    if $SUDO haproxy -c -q -f "$TMP/candidate.cfg"; then
+        echo "✓ candidate validates (dry run, nothing applied)"
+    else
+        echo "✗ candidate does not validate (dry run, nothing applied)" >&2
+        exit 1
+    fi
+    exit 0
+fi
+
+"$SCRIPT_DIR/haproxy-apply" "$TMP/candidate.cfg" $YES

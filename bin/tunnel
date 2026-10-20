@@ -1,0 +1,305 @@
+#!/bin/bash
+# Expose a local port via frp tunnel
+# Usage: tunnel <port> <name> [type] [--bg] [door flags]
+# Example: tunnel 3000 myapp        -> http://myapp.tunnel.cush.rocks
+# Example: tunnel 8080 api tcp      -> tcp tunnel
+# Door flags (lib/door-flags.sh): --expires W, --password, --guest-link,
+# --max-opens N, --burn, --inspect, --inspect-raw. With share rules or the
+# inspector, lib/doorproxy.py runs in front of the port (frpc -> doorproxy ->
+# port); without, frpc goes straight to it.
+# Port "-" (bin/hook only, under TUNNEL_NO_STATE): no app at all; the door
+# proxy answers every request from the state file's `capture` config.
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+FRPC="$TUNNEL_DIR/bin/frpc"
+
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+PORT="$1"
+NAME="$2"
+TYPE="${3:-http}"
+[ "$TYPE" = "--bg" ] && TYPE="http"
+
+if [ -z "$PORT" ] || [ -z "$NAME" ]; then
+  echo "Usage: tunnel <port> <name> [type]"
+  echo ""
+  echo "Examples:"
+  echo "  tunnel 3000 myapp       -> http://myapp.${PORCH_TUNNEL_BASE}"
+  echo "  tunnel 8080 api         -> http://api.${PORCH_TUNNEL_BASE}"
+  echo "  tunnel 22 ssh tcp       -> TCP tunnel on random port"
+  echo "  tunnel 3000 demo --password --expires 2h   -> password-gated, gone in 2h"
+  echo ""
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password (PORCH_DOOR_PASSWORD"
+  echo "or a prompt)  --guest-link  --max-opens N  --burn  --inspect  --inspect-raw"
+  echo ""
+  echo "Active tunnels:"
+  pgrep -af "frpc.*proxy\|frpc.*visitor" 2>/dev/null || echo "  (none)"
+  exit 1
+fi
+
+# The name becomes a public subdomain, a state-file path and a temp-config
+# path — reject anything that isn't a DNS label before any of that is built.
+tunnel_require_valid_name "$NAME"
+
+# PORT and TYPE are spliced into the generated TOML verbatim — a value with a
+# newline or quote in it would add arbitrary config lines. Validate both.
+CAPTURE=""
+if [ "$PORT" = "-" ]; then
+  # No app: bin/hook registered a capture door and runs us under it.
+  if [ -z "$TUNNEL_NO_STATE" ]; then
+    echo "Error: port - (no app) is for bin/hook: use bin/hook <name>" >&2
+    exit 2
+  fi
+  CAPTURE=1
+else
+  case "$PORT" in
+    ""|*[!0-9]*) echo "Error: port must be a number 1-65535 (got: $PORT)" >&2; exit 2 ;;
+  esac
+  if [ "${#PORT}" -gt 5 ] || [ "$((10#$PORT))" -lt 1 ] || [ "$((10#$PORT))" -gt 65535 ]; then
+    echo "Error: port must be a number 1-65535 (got: $PORT)" >&2
+    exit 2
+  fi
+  PORT="$((10#$PORT))"
+fi
+case "$TYPE" in
+  http|https|tcp|udp) ;;
+  *) echo "Error: type must be one of: http https tcp udp (got: $TYPE)" >&2; exit 2 ;;
+esac
+
+# Handle --bg mode
+BG_MODE=""
+for arg in "$@"; do [ "$arg" = "--bg" ] && BG_MODE=1; done
+
+# A launcher (bin/serve, bin/drop, ...) registers the door itself and sets
+# TUNNEL_NO_STATE; its rules are already in the state file. Standalone, the
+# door flags are ours.
+if [ -z "$TUNNEL_NO_STATE" ]; then
+  door_spec_build "$BG_MODE" || exit 2
+  if [ -n "$_PORCH_DOOR_SPEC" ] && [ "$TYPE" != "http" ] && \
+     [[ "$_PORCH_DOOR_SPEC" == *'"password"'* || "$_PORCH_DOOR_SPEC" == *'"guest"'* || "$_PORCH_DOOR_SPEC" == *'"max_opens"'* || "$_PORCH_DOOR_SPEC" == *'"inspect"'* ]]; then
+    echo "Error: share rules (--password/--guest-link/--max-opens/--burn) and --inspect need an http tunnel" >&2
+    exit 2
+  fi
+elif [ "${#DOOR_FLAG_ARGS[@]}" -gt 0 ]; then
+  echo "Error: door flags go to the launcher, not to bin/tunnel under it" >&2
+  exit 2
+fi
+
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$PORT" "$NAME" "$TYPE" && {
+        echo "Tunneling localhost:$PORT -> https://${NAME}.${PORCH_TUNNEL_BASE}"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+TMPCONF=""
+FRPC_PID=""
+PROXY_PID=""
+cleanup() {
+  [ -n "$TMPCONF" ] && rm -f "$TMPCONF"
+  [ -n "${FRPC_PID:-}" ] && kill "$FRPC_PID" 2>/dev/null
+  [ -n "${PROXY_PID:-}" ] && kill "$PROXY_PID" 2>/dev/null
+  if [ -z "$TUNNEL_NO_STATE" ]; then
+    tunnel_state_cleanup "$NAME"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if [ -z "$TUNNEL_NO_STATE" ]; then
+  tunnel_state_register "$NAME" "tunnel" $$ "$PORT"
+fi
+
+# Share rules, the inspector or a capture hook put the door proxy in front of
+# the port. It binds loopback on a port of its own, dies with this script
+# (cleanup below, and it watches its parent), and frpc's localPort points at
+# it instead of the app.
+LOCAL_PORT="$PORT"
+STATE_FILE="${TUNNEL_STATE_DIR}/${NAME}.json"
+PROXY_ARGS=()
+if [ -f "$STATE_FILE" ]; then
+  while IFS= read -r a; do
+    case "$a" in
+      --inspect|--inspect-raw|--capture) PROXY_ARGS+=("$a") ;;
+    esac
+  done < <(door_proxy_args "$STATE_FILE")
+fi
+if [ -n "$CAPTURE" ] && [[ " ${PROXY_ARGS[*]} " != *" --capture "* ]]; then
+  echo "Error: port - needs a capture door (start it with bin/hook)" >&2
+  exit 2
+fi
+# Start lib/doorproxy.py on a free loopback port; sets PROXY_PID and
+# LOCAL_PORT. Used at start and by a live reload (SIGUSR1 below).
+start_door_proxy() {
+  local port
+  port=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
+  local up=(--upstream-port "$PORT")
+  [ -n "$CAPTURE" ] && up=()
+  python3 "$TUNNEL_DIR/lib/doorproxy.py" --name "$NAME" "${up[@]}" \
+      --port "$port" --state-dir "$TUNNEL_STATE_DIR" \
+      --devices "$TUNNEL_DIR/data/devices.json" "${PROXY_ARGS[@]}" &
+  PROXY_PID=$!
+  if ! wait_for_port "$port"; then
+    kill "$PROXY_PID" 2>/dev/null
+    PROXY_PID=""
+    return 1
+  fi
+  LOCAL_PORT="$port"
+}
+
+if [ -f "$STATE_FILE" ] && door_needs_proxy "$STATE_FILE"; then
+  if [ "$TYPE" != "http" ]; then
+    echo "Error: share rules and --inspect need an http tunnel (got $TYPE)" >&2
+    exit 2
+  fi
+  start_door_proxy || exit 1
+fi
+
+# Create temporary config for this tunnel.
+# Note: BSD mktemp on macOS does NOT accept suffix after trailing X's — it
+# errors out on templates like `foo-XXXXX.toml`. Create an X-only template
+# then rename to add the .toml suffix (still race-safe: mv is atomic).
+TMPCONF_BASE=$(mktemp "/tmp/frpc-${NAME}-XXXXX")
+TMPCONF="${TMPCONF_BASE}.toml"
+mv "$TMPCONF_BASE" "$TMPCONF"
+
+# Load server address + per-device token from config/frpc.toml if present.
+# On remote (paired) machines, bin/bootstrap has written the real device_token
+# and a public serverAddr; we must propagate both into the generated config.
+# On the home box config/frpc.toml has no device_token: the home frpc uses
+# data/.home-frpc-token, which the auth server mints on start. (Without it,
+# a 127.0.0.1 login only works while the auth server's localhost bypass is on.)
+USER_CONFIG="$TUNNEL_DIR/config/frpc.toml"
+SERVER_ADDR="127.0.0.1"
+SERVER_PORT="7000"
+DEVICE_TOKEN=""
+if [ -f "$USER_CONFIG" ]; then
+  # crude TOML parser: match `key = "value"` or `key = number` at line start.
+  # IMPORTANT: BSD sed (macOS) does not recognize \s — use [[:space:]] for
+  # POSIX-portable whitespace. If a \s-based regex fails to match on macOS
+  # it silently returns the whole line, which then gets substituted into
+  # the generated TOML and produces:
+  #   json: cannot unmarshal string into Go value of type v1.ClientConfig
+  _extract_toml_val() {
+    # $1 = key name, $2 = file
+    grep -E "^[[:space:]]*$1[[:space:]]*=" "$2" \
+      | head -1 \
+      | sed -E 's/^[^=]*=[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/'
+  }
+  val=$(_extract_toml_val serverAddr "$USER_CONFIG")
+  [ -n "$val" ] && SERVER_ADDR="$val"
+  val=$(_extract_toml_val serverPort "$USER_CONFIG")
+  [ -n "$val" ] && SERVER_PORT="$val"
+  val=$(_extract_toml_val device_token "$USER_CONFIG")
+  [ -n "$val" ] && DEVICE_TOKEN="$val"
+fi
+HOME_TOKEN_FILE="${PORCH_HOME_TOKEN_FILE:-$TUNNEL_DIR/data/.home-frpc-token}"
+if [ -z "$DEVICE_TOKEN" ] && [ -r "$HOME_TOKEN_FILE" ]; then
+  # base64url only; anything else is ignored rather than pasted into TOML.
+  val=$(head -1 "$HOME_TOKEN_FILE" | tr -d '[:space:]')
+  case "$val" in
+    *[!A-Za-z0-9_-]*|"") ;;
+    *) DEVICE_TOKEN="$val" ;;
+  esac
+fi
+
+cat > "$TMPCONF" <<EOF
+serverAddr = "$SERVER_ADDR"
+serverPort = $SERVER_PORT
+auth.method = "token"
+auth.token = ""
+# Revoking a device only bites at its next heartbeat (the server re-checks it
+# in the Ping plugin op). frp turns application heartbeats off by default when
+# tcpMux is on, so set them explicitly.
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+
+[metadatas]
+device_token = "$DEVICE_TOKEN"
+
+[[proxies]]
+name = "$NAME"
+type = "$TYPE"
+localIP = "127.0.0.1"
+localPort = $LOCAL_PORT
+EOF
+
+if [ "$TYPE" = "http" ]; then
+  echo "subdomain = \"$NAME\"" >> "$TMPCONF"
+fi
+
+
+if [ -n "$CAPTURE" ]; then
+  echo "Capturing (no app) -> ${NAME}.${PORCH_TUNNEL_BASE}"
+else
+  echo "Tunneling localhost:$PORT -> ${NAME}.${PORCH_TUNNEL_BASE}"
+fi
+[ -n "$PROXY_PID" ] && echo "Door proxy: 127.0.0.1:$LOCAL_PORT (${PROXY_ARGS[*]:-share rules on})"
+if [ -z "$TUNNEL_NO_STATE" ]; then
+  door_print_summary "$NAME"
+fi
+echo "Press Ctrl+C to stop"
+echo ""
+
+if [ -z "$TUNNEL_NO_STATE" ]; then
+  tunnel_state_watchdog "$NAME" &
+fi
+
+# Kill any stale frpc processes for this proxy name. Matched by PID and by
+# the exact config path, never by a loose command-line substring.
+tunnel_kill_frpc "$NAME" && sleep 1
+
+# Live reload (`porch door rules` adding a first rule to a door that has no
+# proxy yet): SIGUSR1 makes us start the door proxy if the state file now
+# needs one, point the config at it and restart only frpc. The app keeps
+# running; visitors see one frpc reconnect. Our pid goes in the state file
+# as tunnel_pid (with proto) so porch door knows whom to signal.
+RELOAD=""
+trap 'RELOAD=1' USR1
+door_reload() {
+  if [ -n "$PROXY_PID" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
+    return 0                  # already proxied: it re-reads the rules itself
+  fi
+  [ "$TYPE" = "http" ] || return 0
+  door_needs_proxy "$STATE_FILE" || return 0
+  PROXY_ARGS=()
+  while IFS= read -r a; do
+    case "$a" in
+      --inspect|--inspect-raw|--capture) PROXY_ARGS+=("$a") ;;
+    esac
+  done < <(door_proxy_args "$STATE_FILE")
+  if ! start_door_proxy; then
+    echo "door proxy failed to start; rules are NOT enforced" >&2
+    return 1
+  fi
+  local tmp
+  tmp=$(umask 077; mktemp "/tmp/.frpc-${NAME}-reload-XXXXX") || return 1
+  sed "s/^localPort = .*/localPort = $LOCAL_PORT/" "$TMPCONF" > "$tmp" && cat "$tmp" > "$TMPCONF"
+  rm -f "$tmp"
+  kill "$FRPC_PID" 2>/dev/null
+  wait "$FRPC_PID" 2>/dev/null
+  echo "Door proxy: 127.0.0.1:$LOCAL_PORT (share rules on; frpc reconnecting)"
+  "$FRPC" -c "$TMPCONF" &
+  FRPC_PID=$!
+}
+if [ -f "$STATE_FILE" ]; then
+  python3 "$TUNNEL_DIR/lib/door_state.py" set-tunnel "$STATE_FILE" $$ "$TYPE" 2>/dev/null || true
+fi
+
+# Run frpc in background and wait, tracking PID for cleanup
+"$FRPC" -c "$TMPCONF" &
+FRPC_PID=$!
+while :; do
+  wait "$FRPC_PID"
+  if [ -n "$RELOAD" ]; then
+    RELOAD=""
+    door_reload
+    continue
+  fi
+  break
+done

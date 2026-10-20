@@ -1,0 +1,127 @@
+#!/bin/bash
+# Porch relay installer (lib/porch_setup/relay/common.py renders it).
+# Runs as root, either as cloud-init user_data on a new VPS (paid) or over
+# `ssh ... sudo bash -s` on an existing server (byo, oracle). It installs only
+# frps (pinned release, sha256-checked) as porch-relay-frps.service and opens
+# tcp 80, 443, ${frp_port} and ${control_port}. Everything it changes is listed
+# in /etc/porch-relay/installed so uninstall-relay.sh removes exactly that.
+# Values porch filled in are shell-quoted literals.
+set -euo pipefail
+umask 077
+MODE=${mode}
+SSH_FROM=${ssh_from}
+SSH_PUBKEY=${ssh_pubkey}
+FRP_VERSION=${frp_version}
+SHA_AMD64=${sha_amd64}
+SHA_ARM64=${sha_arm64}
+DIR=/etc/porch-relay
+BIN=/usr/local/bin/porch-relay-frps
+UNIT=/etc/systemd/system/porch-relay-frps.service
+PORTS="80 443 ${frp_port} ${control_port}"
+exec > >(tee -a /var/log/porch-relay-install.log) 2>&1
+echo "porch relay install ($$MODE) $$(date -u +%FT%TZ)"
+install -d -m 0700 "$$DIR"
+touch "$$DIR/installed"
+note() { grep -qxF "$$1" "$$DIR/installed" || echo "$$1" >> "$$DIR/installed"; }
+
+case "$$(uname -m)" in
+  x86_64|amd64) ARCH=amd64; SHA=$$SHA_AMD64 ;;
+  aarch64|arm64) ARCH=arm64; SHA=$$SHA_ARM64 ;;
+  *) echo "unsupported architecture $$(uname -m)" >&2; exit 3 ;;
+esac
+command -v curl >/dev/null || { apt-get update -q && apt-get install -y -q curl; } || dnf install -y curl
+name=frp_$${FRP_VERSION}_linux_$$ARCH
+tmp=$$(mktemp -d)
+trap 'rm -rf "$$tmp"' EXIT
+curl -fsSL --retry 5 -o "$$tmp/frp.tar.gz" "https://github.com/fatedier/frp/releases/download/v$$FRP_VERSION/$$name.tar.gz"
+echo "$$SHA  $$tmp/frp.tar.gz" | sha256sum -c -
+tar -xzf "$$tmp/frp.tar.gz" -C "$$tmp"
+install -m 0755 "$$tmp/$$name/frps" "$$BIN"
+note "file $$BIN"
+
+# Bind on the public address when it is on an interface (a VPS); behind 1:1
+# NAT (Oracle) the interface only has a private address: bind every interface.
+src=$$(ip -4 -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+case "$$src" in
+  ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) BIND=0.0.0.0 ;;
+  *) BIND=$$src ;;
+esac
+cat > "$$DIR/frps.toml" <<CONF
+# porch relay frps: a dumb TCP pass-through for one home. No dashboard.
+bindAddr = "$$BIND"
+bindPort = ${control_port}
+proxyBindAddr = "$$BIND"
+auth.method = "token"
+auth.token = "${token}"
+allowPorts = [{ single = 80 }, { single = 443 }, { single = ${frp_port} }]
+maxPortsPerClient = 3
+log.to = "console"
+log.level = "info"
+CONF
+chmod 600 "$$DIR/frps.toml"
+note "file $$DIR/frps.toml"
+"$$BIN" verify -c "$$DIR/frps.toml"
+
+cat > "$$UNIT" <<UNITEOF
+[Unit]
+Description=Porch relay (frps pass-through)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+DynamicUser=yes
+LoadCredential=frps.toml:$$DIR/frps.toml
+ExecStart=$$BIN -c %d/frps.toml
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+note "unit porch-relay-frps.service"
+systemctl daemon-reload
+systemctl enable porch-relay-frps.service
+systemctl restart porch-relay-frps.service
+
+if [ -n "$$SSH_PUBKEY" ]; then
+  install -d -m 0700 /root/.ssh
+  touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+  grep -qxF "$$SSH_PUBKEY" /root/.ssh/authorized_keys || echo "$$SSH_PUBKEY" >> /root/.ssh/authorized_keys
+fi
+
+# Firewall. paid: porch owns the server, so ufw is reset to deny everything
+# but ssh (from the creator's address when known) and the relay ports.
+# byo/oracle: only add allow rules for the relay ports, never touch ssh.
+if [ "$$MODE" = paid ] && command -v ufw >/dev/null; then
+  ufw --force reset >/dev/null
+  ufw default deny incoming
+  ufw default allow outgoing
+  if [ -n "$$SSH_FROM" ]; then ufw allow from "$$SSH_FROM" to any port 22 proto tcp comment porch-relay-ssh
+  else ufw allow 22/tcp comment porch-relay-ssh; fi
+  for p in $$PORTS; do ufw allow "$$p/tcp" comment porch-relay; done
+  ufw --force enable
+  note "ufw-enabled"
+elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+  for p in $$PORTS; do ufw allow "$$p/tcp" comment porch-relay; note "ufw $$p"; done
+elif command -v iptables >/dev/null && iptables -S INPUT | grep -qE -- '-j (REJECT|DROP)|-P INPUT DROP'; then
+  # Oracle's images REJECT everything but ssh in iptables: insert accepts.
+  for p in $$PORTS; do
+    iptables -C INPUT -p tcp --dport "$$p" -m comment --comment porch-relay -j ACCEPT 2>/dev/null \
+      || iptables -I INPUT -p tcp --dport "$$p" -m comment --comment porch-relay -j ACCEPT
+    note "iptables $$p"
+  done
+  if command -v netfilter-persistent >/dev/null; then netfilter-persistent save; note "netfilter-persistent"; fi
+fi
+
+for i in $$(seq 30); do
+  ss -Hltn "sport = :${control_port}" | grep -q . && break
+  sleep 1
+done
+ss -Hltn "sport = :${control_port}" | grep -q . || { journalctl -u porch-relay-frps -n 30 --no-pager; exit 4; }
+echo "PORCH_RELAY_OK bind=$$BIND"

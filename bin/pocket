@@ -1,0 +1,142 @@
+#!/bin/bash
+# Start Pocket — a phone share target + clipboard handoff — and expose it via tunnel.
+# Usage: bin/pocket [name] [--bg] [door flags]
+# Example: bin/pocket            -> pocket.tunnel.cush.rocks
+#          bin/pocket work --bg  -> work.tunnel.cush.rocks, daemonized
+#
+# Owner only: every page and API needs a browser enrolled with cush-auth
+# (porch_host / cush_auth cookie checked against data/devices.json); anyone
+# else sees "Owner? Sign in" and nothing more. Installed as a PWA on Android it
+# appears in the share sheet; shared files land in ~/pocket/<name>/inbox/ and
+# shared text/links become the clipboard. `porch clip` reads and sets the
+# clipboard from this box. The door does not expire unless --expires is given.
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --install-service [name] / --uninstall-service [name]: run it as the systemd
+# user unit porch-pocket@<name>.service (survives reboots with linger).
+case "${1:-}" in
+  --install-service|--uninstall-service)
+    _svc_name="${2:-pocket}"
+    tunnel_require_valid_name "$_svc_name"
+    if [ "$1" = "--install-service" ] && [ -f "${TUNNEL_STATE_DIR}/${_svc_name}.json" ] \
+        && ! systemctl --user is-active --quiet "porch-pocket@${_svc_name}.service" 2>/dev/null; then
+        # A hand-started pocket of that name would hold the tunnel name.
+        echo "Stopping the running '$_svc_name' so the service can take over"
+        "$TUNNEL_DIR/bin/status" close "$_svc_name" >/dev/null 2>&1 || true
+        sleep 1
+    fi
+    exec python3 "$TUNNEL_DIR/lib/pocketserver.py" "$1" "$_svc_name"
+    ;;
+esac
+
+# Pocket is meant to stay up: default to --expires never unless one was given.
+# Not in a --bg re-exec: the parent's spec (whatever expiry) arrives in env.
+_has_expires="${_CUSH_DAEMONIZED:-}"
+for arg in "$@"; do
+    case "$arg" in --expires|--expires=*) _has_expires=1 ;; esac
+done
+[ -z "$_has_expires" ] && set -- "$@" --expires never
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+BG_MODE=""
+ORIG_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--bg" ]; then BG_MODE=1
+    else ORIG_ARGS+=("$arg"); fi
+done
+set -- "${ORIG_ARGS[@]}"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: pocket [name] [--bg]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never (default: never)  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "An owner-only share target and clipboard. Open it on your phone, add it to"
+  echo "the home screen (Android: it then shows up in the share sheet), and share"
+  echo "photos, files and links to it. Files land in ~/pocket/<name>/inbox/; text"
+  echo "and links become the clipboard, which every signed-in device sees live."
+  echo "iOS has no web share target: the page's iPhone setup builds a Shortcut (device key)."
+  echo ""
+  echo "From this box:  porch clip | porch clip set <text>|- | porch clip ls | porch clip watch"
+  echo ""
+  echo "Keep it up across reboots (systemd user unit porch-pocket@<name>.service):"
+  echo "  pocket --install-service [name]     install, enable and start it"
+  echo "  pocket --uninstall-service [name]   stop and remove it"
+  echo ""
+  echo "Examples:"
+  echo "  pocket          -> pocket.${PORCH_TUNNEL_BASE}"
+  echo "  pocket work --bg -> work.${PORCH_TUNNEL_BASE}"
+  exit 0
+fi
+
+NAME="${1:-pocket}"
+# $NAME also names the directory under ~/pocket — validate before mkdir.
+tunnel_require_valid_name "$NAME"
+
+door_spec_build "$BG_MODE" || exit 2
+
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" && {
+        echo "Pocket: https://${NAME}.${PORCH_TUNNEL_BASE}"
+        echo "Inbox: $HOME/pocket/$NAME/inbox/"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+POCKET_DIR="$HOME/pocket/$NAME"
+mkdir -p "$POCKET_DIR"
+chmod 700 "$POCKET_DIR"
+
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT
+# A signal (systemctl stop, bin/status close, the expiry watchdog) is a stop:
+# exit 143, which the service unit counts as success (no restart).
+trap 'exit 143' INT TERM
+
+# --devices: the owner's enrolled browser is the only way in. Without a match
+# (or without the file) nobody can open the pocket: it fails closed.
+# --name: the CLI token goes to <run dir>/pocket/<name>.token for `porch clip`.
+python3 "$TUNNEL_DIR/lib/pocketserver.py" \
+    --port "$PORT" \
+    --bind 127.0.0.1 \
+    --dir "$POCKET_DIR" \
+    --name "$NAME" \
+    --devices "$TUNNEL_DIR/data/devices.json" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+tunnel_state_register "$NAME" "pocket" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "Pocket: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo "Inbox: $POCKET_DIR/inbox/"
+echo ""
+
+door_print_summary "$NAME"
+
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"
+rc=$?
+# The tunnel ended without being told to (frpc died or gave up): that is a
+# failure, so porch-pocket@.service (Restart=on-failure) brings it back.
+[ "$rc" -eq 0 ] && rc=1
+exit "$rc"

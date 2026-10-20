@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""bin/release: cut a public Porch release on GitHub.
+
+Usage: bin/release [--version vX.Y.Z] [--dry-run] [--yes] [--repo OWNER/NAME]
+                   [--notes TEXT | --notes-file F] [--dist DIR]
+                   [--author-name N] [--author-email E]
+
+  1. bin/public-export into a temp dir (HEAD only, exclude list, leak scan);
+  2. builds porch.tar.gz + porch.tar.gz.sha256 FROM THAT EXPORT (its own
+     bin/publish-tarball --prefix porch), so the tarball holds exactly the
+     public files, under one top-level porch/ directory;
+  3. force-pushes the export's single commit to the GitHub repo's main (the
+     public history is one squashed snapshot per release; the old main is
+     replaced);
+  4. gh release create <version> porch.tar.gz porch.tar.gz.sha256.
+
+site/porch.sh in the public repo downloads
+https://github.com/<repo>/releases/latest/download/porch.tar.gz (+ .sha256).
+
+  --version      default: v0.1.0 when the repo has no release yet, else the
+                 highest vX.Y.Z there with the patch bumped
+  --dry-run      do steps 1-2 locally, print the git/gh commands, run none
+  --yes          required for a real run (it force-pushes main)
+  --repo         default Hexidecibel/porch
+  --dist DIR     where the tarball lands (default
+                 ~/.local/share/porch/release/<version>)
+  --remote URL   push URL (default https://github.com/<repo>.git)
+
+Exit: 0 ok, 1 a step failed, 2 usage (or a real run without --yes).
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_REPO = "Hexidecibel/porch"
+TARBALL = "porch.tar.gz"
+PREFIX = "porch"
+VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+# Files that must be in the release tarball (relative to porch/).
+REQUIRED = ("bin/porch", "site/porch.sh", "lib/porch_config.py", "bin/publish-tarball")
+# Never in a release, whatever the exclude list says.
+PRIVATE = ("CLAUDE.md", "todo.md", "lessons.md", "share/public-export-markers.txt")
+
+
+class ReleaseError(Exception):
+    pass
+
+
+def say(msg=""):
+    print(msg, flush=True)
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def latest_tags(repo):
+    """Tag names of the repo's releases (gh). Raises ReleaseError."""
+    if not shutil.which("gh"):
+        raise ReleaseError("gh is not installed")
+    p = run(["gh", "release", "list", "--repo", repo, "--limit", "100",
+             "--json", "tagName", "--jq", ".[].tagName"])
+    if p.returncode != 0:
+        raise ReleaseError(f"gh release list failed: {(p.stderr or p.stdout).strip()[:300]}")
+    return [t.strip() for t in p.stdout.splitlines() if t.strip()]
+
+
+def next_version(tags):
+    vers = sorted(tuple(map(int, m.groups())) for m in map(VERSION_RE.match, tags) if m)
+    if not vers:
+        return "v0.1.0"
+    a, b, c = vers[-1]
+    return f"v{a}.{b}.{c + 1}"
+
+
+def export(dest, args):
+    cmd = [sys.executable, os.path.join(REPO_ROOT, "bin", "public-export"),
+           "--out", dest, "--repo", args.source]
+    if args.author_name:
+        cmd += ["--author-name", args.author_name]
+    if args.author_email:
+        cmd += ["--author-email", args.author_email]
+    if args.no_gh:
+        cmd.append("--no-gh")
+    p = run(cmd, timeout=600)
+    sys.stdout.write(p.stdout)
+    sys.stderr.write(p.stderr)
+    if p.returncode != 0:
+        raise ReleaseError(f"bin/public-export failed (exit {p.returncode})")
+
+
+def build_tarball(export_dir, dist):
+    os.makedirs(dist, exist_ok=True)
+    out = os.path.join(dist, TARBALL)
+    script = os.path.join(export_dir, "bin", "publish-tarball")
+    if not os.path.isfile(script):
+        raise ReleaseError("the export has no bin/publish-tarball")
+    p = run(["bash", script, "--out", out, "--prefix", PREFIX], timeout=600)
+    sys.stdout.write(p.stdout)
+    sys.stderr.write(p.stderr)
+    if p.returncode != 0:
+        raise ReleaseError(f"publish-tarball failed (exit {p.returncode})")
+    check_tarball(out, export_dir)
+    return out
+
+
+def check_tarball(path, export_dir):
+    """Every member is porch/<a file the export tracks> (plus the shipped
+    manifest); the required files are there; no private file is."""
+    tracked = set(run(["git", "-C", export_dir, "ls-files"]).stdout.split("\n")) - {""}
+    with tarfile.open(path) as t:
+        names = [m.name for m in t.getmembers() if not m.isdir()]
+    rel = set()
+    for n in names:
+        if not n.startswith(PREFIX + "/"):
+            raise ReleaseError(f"tarball member outside {PREFIX}/: {n}")
+        r = n[len(PREFIX) + 1:]
+        if r != "share/porch-files.txt" and r not in tracked:
+            raise ReleaseError(f"tarball has a file the public repo does not: {r}")
+        rel.add(r)
+    missing = [r for r in REQUIRED if r not in rel]
+    if missing:
+        raise ReleaseError(f"tarball is missing {', '.join(missing)}")
+    private = [r for r in rel if r in PRIVATE or r.startswith(".claude/")]
+    if private:
+        raise ReleaseError(f"tarball has private files: {', '.join(sorted(private))}")
+    return sorted(rel)
+
+
+def check_installer(export_dir, repo):
+    """The exported site/porch.sh must default to this repo's release."""
+    want = f"https://github.com/{repo}/releases/latest/download/{TARBALL}"
+    with open(os.path.join(export_dir, "site", "porch.sh"), encoding="utf-8") as f:
+        if want not in f.read():
+            say(f"! warning: site/porch.sh does not default to {want}")
+
+
+def notes_text(version, repo, sha):
+    raw = f"https://raw.githubusercontent.com/{repo}/main/site/porch.sh"
+    return (f"Porch {version}.\n\n"
+            "Install on a fresh Ubuntu 22.04/24.04 or Debian 12/13 server:\n\n"
+            f"    curl -sSL {raw} | sudo sh -s -- --check   # read-only report first\n"
+            f"    curl -sSL {raw} | sudo sh\n\n"
+            f"`{TARBALL}` sha256: `{sha}`\n")
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="bin/release", description="Cut a public Porch release on GitHub.")
+    p.add_argument("--version")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--yes", action="store_true")
+    p.add_argument("--repo", default=DEFAULT_REPO)
+    p.add_argument("--remote")
+    p.add_argument("--dist")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--notes")
+    g.add_argument("--notes-file")
+    p.add_argument("--author-name")
+    p.add_argument("--author-email")
+    p.add_argument("--source", default=REPO_ROOT, help=argparse.SUPPRESS)   # tests
+    p.add_argument("--no-gh", action="store_true", help=argparse.SUPPRESS)  # tests: export identity
+    args = p.parse_args(argv)
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo):
+        p.error(f"--repo must be OWNER/NAME: {args.repo}")
+    if args.version and not VERSION_RE.match(args.version):
+        p.error(f"--version must look like v1.2.3: {args.version}")
+    remote = args.remote or f"https://github.com/{args.repo}.git"
+
+    try:
+        if args.version:
+            version = args.version
+        else:
+            try:
+                tags = latest_tags(args.repo)
+            except ReleaseError as e:
+                if not args.dry_run:
+                    raise
+                say(f"! could not list releases ({e}); assuming none")
+                tags = []
+            version = next_version(tags)
+            if version in tags:
+                raise ReleaseError(f"{version} already exists")
+        say(f"→ release {version} of {args.repo}" + (" (dry run)" if args.dry_run else ""))
+
+        dirty = run(["git", "-C", args.source, "status", "--porcelain", "--untracked-files=no"]).stdout
+        if dirty.strip():
+            say("! the working tree has uncommitted changes: the release is built from HEAD only")
+
+        dist = os.path.abspath(os.path.expanduser(
+            args.dist or os.path.join("~", ".local", "share", "porch", "release", version)))
+        work = tempfile.mkdtemp(prefix="porch-release-")
+        try:
+            exp = os.path.join(work, "porch")
+            say("→ exporting the public tree (bin/public-export)")
+            export(exp, args)
+            check_installer(exp, args.repo)
+            say("→ building the release tarball from the export")
+            for old in (TARBALL, TARBALL + ".sha256"):
+                if os.path.exists(os.path.join(dist, old)):
+                    os.unlink(os.path.join(dist, old))
+            tgz = build_tarball(exp, dist)
+            with open(tgz + ".sha256", encoding="utf-8") as f:
+                sha = f.read().split()[0]
+            head = run(["git", "-C", exp, "log", "-1", "--format=%h %s"]).stdout.strip()
+
+            if args.notes_file:
+                notes = ["--notes-file", os.path.abspath(args.notes_file)]
+            else:
+                notes = ["--notes", args.notes or notes_text(version, args.repo, sha)]
+            push = ["git", "-C", exp, "push", "--force", remote, "HEAD:refs/heads/main"]
+            release = ["gh", "release", "create", version, tgz, tgz + ".sha256",
+                       "--repo", args.repo, "--target", "main", "--title", f"Porch {version}", *notes]
+
+            say("")
+            say(f"Tarball:  {tgz}")
+            say(f"sha256:   {sha}")
+            say(f"Export:   {head}")
+            say("")
+            say(f"This replaces {args.repo}'s main with ONE fresh commit (a force-push: the")
+            say("previous public history is dropped), then publishes the release:")
+            say("  " + " ".join(_q(c) for c in push))
+            say("  " + " ".join(_q(c) for c in release))
+            if not args.notes_file:
+                say("Release notes:")
+                for ln in notes[1].splitlines():
+                    say("  | " + ln)
+            if args.dry_run:
+                say("\n✓ dry run: nothing pushed, no release created")
+                return 0
+            if not args.yes:
+                say("\nRe-run with --yes to do it.")
+                return 2
+            for cmd in (push, release):
+                say(f"→ {cmd[0]} {cmd[1] if cmd[0] == 'gh' else cmd[3]} ...")
+                r = run(cmd, timeout=900)
+                sys.stdout.write(r.stdout)
+                sys.stderr.write(r.stderr)
+                if r.returncode != 0:
+                    raise ReleaseError(f"{cmd[0]} failed (exit {r.returncode})")
+            say(f"✓ released {version}: https://github.com/{args.repo}/releases/tag/{version}")
+            return 0
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    except ReleaseError as e:
+        print(f"release: {e}", file=sys.stderr)
+        return 1
+
+
+def _q(s):
+    if re.fullmatch(r"[A-Za-z0-9_./:=@+-]+", s):
+        return s
+    if "\n" in s:
+        return "'<notes: " + str(s.count("\n")) + " lines>'"
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+if __name__ == "__main__":
+    sys.exit(main())

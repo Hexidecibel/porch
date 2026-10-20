@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# porch-auth-check — is /__porch/ on <host> routed to the auth server?
+#
+# Usage: bin/porch-auth-check <host> [<host> ...]
+#        e.g. bin/porch-auth-check music.tunnel.cush.rocks panel.cush.rocks
+#
+# Talks to HAProxy on this box (127.0.0.1:443, via curl --resolve, so the
+# real certificate is checked) and asks for:
+#   GET /__porch/me     must be the auth server's JSON {authenticated, host, ...}
+#   GET /__porch/start  must 302 to https://<auth host>/auth/handoff?host=<host>
+#                       and set the __Host-porch_state cookie
+# Anything else means step A of config/haproxy-porch.snippet.cfg is not live
+# for that host (the request reached the app, or a login redirect).
+# Set PORCH_HOST_TOKEN=<porch_host cookie value> to also see whether that
+# cookie is accepted on the host. Exit 0 only if every host passes.
+
+set -uo pipefail
+
+if [[ $# -lt 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    [[ $# -lt 1 ]] && exit 2 || exit 0
+fi
+
+source "$(dirname "$0")/../lib/porch-config.sh"
+ADDR="${PORCH_CHECK_ADDR:-127.0.0.1}"
+fail=0
+
+for host in "$@"; do
+    host="$(printf '%s' "$host" | tr 'A-Z' 'a-z')"
+    if [[ ! "$host" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+        echo "✗ $host: not a hostname" >&2
+        fail=1
+        continue
+    fi
+    tmp="$(mktemp -d)"
+    cookie=()
+    if [[ -n "${PORCH_HOST_TOKEN:-}" ]]; then
+        # Via a 0600 header file, so the token is not on a command line.
+        (umask 077; printf 'Cookie: porch_host=%s\n' "$PORCH_HOST_TOKEN" > "$tmp/cookie")
+        cookie=(-H "@$tmp/cookie")
+    fi
+
+    me_code="$(curl -sS --max-time 10 --resolve "$host:443:$ADDR" "${cookie[@]}" \
+        -o "$tmp/me" -w '%{http_code} %{content_type}' "https://$host/__porch/me" 2>"$tmp/err")" \
+        || me_code="curl-error $(head -c 200 "$tmp/err")"
+    st_code="$(curl -sS --max-time 10 --resolve "$host:443:$ADDR" -D "$tmp/hdr" -o /dev/null \
+        -w '%{http_code} %{redirect_url}' "https://$host/__porch/start?rd=%2F" 2>>"$tmp/err")" \
+        || st_code="curl-error"
+
+    ok=1
+    me_json="$(python3 - "$tmp/me" "$host" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict) or "authenticated" not in d or d.get("host") != sys.argv[2]:
+    sys.exit(1)
+dev = d.get("device") or {}
+print("authenticated" if d["authenticated"] else "not signed in",
+      f"(device {dev.get('name') or dev.get('id')}, role {dev.get('role')})" if dev else "")
+PY
+)" || ok=0
+
+    case "$st_code" in
+        "302 https://${PORCH_AUTH_HOST}/auth/handoff?host=${host}&"*) ;;
+        *) ok=0 ;;
+    esac
+    grep -qi '^set-cookie: __Host-porch_state=' "$tmp/hdr" 2>/dev/null || ok=0
+
+    if [[ $ok -eq 1 ]]; then
+        echo "✓ $host: /__porch/ reaches the auth server; porch_host: $me_json"
+    else
+        echo "✗ $host: /__porch/ is NOT routed to the auth server" >&2
+        echo "    /__porch/me    -> $me_code" >&2
+        echo "    /__porch/start -> $st_code" >&2
+        fail=1
+    fi
+    rm -rf "$tmp"
+done
+
+exit $fail

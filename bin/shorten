@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Manage short links for the cush-shortener service
+# Usage: bin/shorten add <slug> <url>
+#        bin/shorten rm <slug>
+#        bin/shorten list
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../lib/tunnel-state.sh
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+DATA_DIR="$TUNNEL_DIR/data"
+LINKS_FILE="$DATA_DIR/links.json"
+
+# Ensure data dir and links file exist
+mkdir -p "$DATA_DIR"
+[ -f "$LINKS_FILE" ] || echo '{}' > "$LINKS_FILE"
+
+usage() {
+  echo "Usage: shorten <command> [args]"
+  echo ""
+  echo "Commands:"
+  echo "  add <slug> <url>   Add a short link"
+  echo "  rm <slug>          Remove a short link"
+  echo "  list               List all short links"
+  exit 1
+}
+
+signal_server() {
+  local pid pids
+  pid=$(systemctl show cush-shortener --property=MainPID --value 2>/dev/null || true)
+  if [ -z "$pid" ] || [ "$pid" = "0" ]; then
+    # `pgrep -f shortenerserver.py` also matches any shell that mentions the
+    # script, and returns several PIDs on one line when it does — which then
+    # went straight into `kill -HUP`. Require a python process whose command
+    # line really runs the server, and signal each one individually.
+    pids=$(cush_pids_for 'python*' 'shortenerserver.py' || true)
+  else
+    pids="$pid"
+  fi
+  if [ -n "$pids" ]; then
+    local signalled=""
+    for pid in $pids; do
+      kill -HUP "$pid" 2>/dev/null && signalled="$signalled $pid"
+    done
+    if [ -n "$signalled" ]; then
+      echo "Server reloaded (PID$signalled)"
+    else
+      echo "Failed to signal server"
+    fi
+  else
+    echo "Server not running, changes will apply on next start"
+  fi
+}
+
+cmd_add() {
+  local slug="$1" url="$2"
+
+  # Validate slug
+  if ! [[ "$slug" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: slug must match [a-zA-Z0-9_-]+" >&2
+    exit 1
+  fi
+
+  # Validate URL
+  if ! [[ "$url" =~ ^https?:// ]]; then
+    echo "Error: URL must start with http:// or https://" >&2
+    exit 1
+  fi
+
+  # Check for duplicate
+  existing=$(python3 -c "
+import json, sys
+f, slug = sys.argv[1], sys.argv[2]
+data = json.load(open(f))
+if slug in data:
+    print(data[slug])
+" "$LINKS_FILE" "$slug" 2>/dev/null || true)
+
+  if [ -n "$existing" ]; then
+    echo "Error: '$slug' already exists → $existing" >&2
+    echo "Use 'shorten rm $slug' first to replace it." >&2
+    exit 1
+  fi
+
+  # Add the link
+  python3 -c "
+import json, os, sys, tempfile
+def save(f, data):
+    # temp + rename: a crash or a full disk mid-write must never leave the
+    # shortener with a truncated links.json (it would 404 every slug).
+    d = os.path.dirname(os.path.abspath(f))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.links-')
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, os.stat(f).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, f)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+f, slug, url = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(f, 'r') as fh:
+    data = json.load(fh)
+data[slug] = url
+save(f, data)
+" "$LINKS_FILE" "$slug" "$url" || { echo "Error: could not update $LINKS_FILE" >&2; exit 1; }
+
+  echo "Added: $slug → $url"
+  signal_server
+}
+
+cmd_rm() {
+  local slug="$1"
+
+  removed=$(python3 -c "
+import json, os, sys, tempfile
+def save(f, data):
+    # temp + rename: a crash or a full disk mid-write must never leave the
+    # shortener with a truncated links.json (it would 404 every slug).
+    d = os.path.dirname(os.path.abspath(f))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.links-')
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, os.stat(f).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, f)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+f, slug = sys.argv[1], sys.argv[2]
+with open(f, 'r') as fh:
+    data = json.load(fh)
+if slug not in data:
+    print('NOT_FOUND')
+else:
+    del data[slug]
+    save(f, data)
+    print('OK')
+" "$LINKS_FILE" "$slug")
+
+  if [ "$removed" = "NOT_FOUND" ]; then
+    echo "Warning: '$slug' not found" >&2
+    exit 1
+  fi
+
+  echo "Removed: $slug"
+  signal_server
+}
+
+cmd_list() {
+  python3 -c "
+import json, sys
+with open(sys.argv[1], 'r') as f:
+    data = json.load(f)
+if not data:
+    print('No links')
+else:
+    for slug, url in sorted(data.items()):
+        print(f'{slug} → {url}')
+" "$LINKS_FILE"
+}
+
+[ $# -lt 1 ] && usage
+
+case "$1" in
+  add)
+    [ $# -ne 3 ] && { echo "Usage: shorten add <slug> <url>" >&2; exit 1; }
+    cmd_add "$2" "$3"
+    ;;
+  rm)
+    [ $# -ne 2 ] && { echo "Usage: shorten rm <slug>" >&2; exit 1; }
+    cmd_rm "$2"
+    ;;
+  list)
+    cmd_list
+    ;;
+  -h|--help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage
+    ;;
+esac

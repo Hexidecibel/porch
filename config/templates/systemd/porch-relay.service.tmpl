@@ -1,0 +1,12 @@
+[Unit]
+Description=Porch relay client (${brand}): relay ${relay_ip} -> this box
+After=network-online.target
+
+[Service]
+ExecStart=${repo_dir}/bin/frpc -c ${repo_dir}/config/relay-frpc.toml
+Restart=always
+RestartSec=5
+WorkingDirectory=${repo_dir}
+
+[Install]
+WantedBy=default.target

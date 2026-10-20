@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<!--
+  A Porch error page HAProxy answers with itself (errorfile), built by
+  lib/porch_errors.py into a raw HTTP response (bin/haproxy-errors installs
+  them). HAProxy keeps the whole file in one buffer (tune.bufsize, 16 KB by
+  default), so everything is inline and small: system fonts, no requests but
+  the retry's HEAD to this same URL. The <style> and <script> are the same on
+  every page (the CSP names their sha256); each page differs only in its
+  text and the data-* attributes on <html>. Text goes in as written here;
+  the host comes from location.hostname through textContent.
+  __CODE__ __REASON__, mode __MODE__, lamp __LAMP__.
+-->
+<html lang="en" data-code="__CODE__" data-mode="__MODE__" data-lamp="__LAMP__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark light">
+<title>__TITLE__ · __BRAND__</title>
+<style>
+:root{--g:#121014;--s:#1B181E;--ln:#2C2630;--t:#F3ECE4;--m:#A79E95;--f:#6F6670;--l:#F5A524;--li:#F5A524;--lo:#3A2F22;--lw:#C78418;--h:#4A424F;--gl:245,165,36;--mo:#CFC6BB;--d:"Avenir Next","Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;--b:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mn:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;color-scheme:dark}
+@media (prefers-color-scheme:light){:root{--g:#F7F3EE;--s:#FFFDFA;--ln:#E4DCD2;--t:#221C17;--m:#6B6158;--f:#9A9087;--li:#9A560A;--lo:#D9CBB8;--lw:#E0A040;--h:#8C8279;--gl:230,150,30;--mo:#8C8279;color-scheme:light}}
+*{box-sizing:border-box}[hidden]{display:none!important}html,body{height:100%}
+body{margin:0;background:var(--g);color:var(--t);font:16px/1.6 var(--b);display:flex;flex-direction:column;padding:max(24px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+main{flex:1;width:100%;max-width:560px;margin:0 auto;display:flex;flex-direction:column;justify-content:center;gap:26px}
+.sc{position:relative;width:160px;height:160px;border:0;padding:0;background:none;cursor:pointer;color:var(--h);-webkit-tap-highlight-color:transparent}
+.sc:focus-visible{outline:2px solid var(--l);outline-offset:8px;border-radius:12px}
+.sc svg{position:relative;width:100%;height:100%;overflow:visible}
+.ln{fill:none;stroke:currentColor;stroke-width:4.5;stroke-linecap:round;stroke-linejoin:round}
+.lp{fill:var(--lo)}.dr{fill:none}.br{fill:none;stroke:none;stroke-width:3.5;stroke-linecap:round}
+.ha{position:absolute;left:50%;top:34.4%;width:150px;height:150px;margin:-75px 0 0 -75px;border-radius:50%;pointer-events:none;background:radial-gradient(circle,rgba(var(--gl),.42) 0,rgba(var(--gl),.1) 38%,rgba(var(--gl),0) 68%);opacity:0}
+.mo{position:absolute;left:50%;top:34.4%;width:4px;height:3px;margin:-1.5px 0 0 -2px;border-radius:50%;background:var(--mo);opacity:.5;pointer-events:none;animation:oa 9s linear infinite}
+.mo+.mo{animation:ob 13s linear infinite;opacity:.32}
+@keyframes oa{from{transform:rotate(0) translateX(30px) rotate(0) scaleX(1.6)}to{transform:rotate(360deg) translateX(30px) rotate(-360deg) scaleX(1.6)}}
+@keyframes ob{from{transform:rotate(140deg) translateX(46px) translateY(6px) scaleX(1.4)}to{transform:rotate(-220deg) translateX(46px) translateY(6px) scaleX(1.4)}}
+[data-lamp=on] .lp{fill:var(--l)}[data-lamp=on] .ha{opacity:.8}
+[data-lamp=off] .br{stroke:var(--li)}[data-lamp=off] .mo{display:none}
+[data-lamp=sputter] .lp{animation:sp 7s steps(1,end) infinite}[data-lamp=sputter] .ha{animation:sh 7s steps(1,end) infinite}
+@keyframes sp{0%,88%,100%{fill:var(--lo)}89%,92%{fill:var(--l)}90%,93.5%,96%{fill:var(--lo)}95%{fill:var(--lw)}}
+@keyframes sh{0%,88%,100%{opacity:0}89%{opacity:.9}90%,93.5%,96%{opacity:0}92%{opacity:1}95%{opacity:.45}}
+[data-lamp=busy] .lp{animation:bz 1.1s steps(1,end) infinite}[data-lamp=busy] .ha{animation:bh 1.1s steps(1,end) infinite}
+@keyframes bz{0%,40%{fill:var(--l)}20%,60%,100%{fill:var(--lw)}}
+@keyframes bh{0%,40%{opacity:.9}20%,60%,100%{opacity:.35}}
+.sc.try .lp{animation:tr 1.3s steps(1,end) 1}.sc.try .ha{animation:th 1.3s steps(1,end) 1}
+@keyframes tr{0%,22%,70%{fill:var(--l)}12%,56%,78%,100%{fill:var(--lo)}48%{fill:var(--lw)}}
+@keyframes th{0%,22%{opacity:1}12%,56%,78%,100%{opacity:0}48%{opacity:.45}70%{opacity:.9}}
+.back .dr{fill:rgba(var(--gl),.55)}.back .lp{fill:var(--l)!important;animation:none!important}.back .ha{opacity:1!important;animation:none!important}.back .mo{display:none}
+.wh{font:500 13px/1.4 var(--mn);color:var(--li);letter-spacing:.02em;overflow-wrap:anywhere;margin-top:4px}
+h1{font:700 clamp(32px,8.5vw,50px)/1.04 var(--d);letter-spacing:-.02em;margin:8px 0 0;text-wrap:balance}
+p{margin:0}.le{color:var(--m);font-size:17px;max-width:46ch}
+.ac{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.bt{display:inline-flex;align-items:center;justify-content:center;height:48px;min-width:44px;padding:0 20px;border-radius:12px;border:0;background:var(--l);color:#1B1206;font:600 16px var(--b);cursor:pointer;text-decoration:none;-webkit-tap-highlight-color:transparent}
+.bt.gh{background:transparent;color:var(--li);border:1px solid rgba(var(--gl),.5)}
+.bt:disabled{opacity:.55;cursor:default}.bt:focus-visible{outline:2px solid var(--l);outline-offset:3px}
+.st{display:flex;gap:10px;align-items:center;color:var(--m);font-size:15px}
+.st i{flex:none;width:9px;height:9px;border-radius:50%;background:var(--lw);animation:wt 2.4s ease-in-out infinite}
+@keyframes wt{0%,100%{opacity:.35}50%{opacity:1;box-shadow:0 0 10px 1px rgba(var(--gl),.45)}}
+footer{max-width:560px;width:100%;margin:28px auto 0;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font:400 12px var(--mn);color:var(--f)}
+@media (max-width:480px){.sc{width:132px;height:132px}.ac .bt{flex:1 1 100%}}
+@media (prefers-reduced-motion:reduce){.lp,.ha,.mo,.st i{animation:none!important}.mo{display:none}}
+</style>
+</head>
+<body>
+<main>
+<div>
+<button class="sc" id="sc" type="button" aria-label="The porch light. Tap to flick the switch.">
+<span class="ha" aria-hidden="true"></span>
+<svg viewBox="0 0 64 64" aria-hidden="true"><path class="ln" d="M8 30 L32 10 L56 30"/><path class="ln" d="M16 28 V54 H48 V28"/><path class="dr" d="M27 54 V40 H37 V54 Z"/><path class="ln" d="M27 54 V40 H37 V54"/><path class="br" d="M24 47 H40"/><circle class="lp" cx="32" cy="22" r="5.5"/></svg>
+<span class="mo" aria-hidden="true"></span><span class="mo" aria-hidden="true"></span>
+</button>
+<div class="wh" id="wh">this door</div>
+<h1 id="h">__TITLE__</h1>
+</div>
+<p class="le" id="le">__LEDE__</p>
+<div class="ac"><button class="bt" id="go" type="button">__BUTTON__</button><a class="bt gh" id="hm" href="/">Front door</a></div>
+<div class="st" id="st" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span id="sx"></span></div>
+</main>
+<footer><span>__CODE__ · __FOOT__</span><span>__BRAND__</span></footer>
+<script>
+(function(){var d=document,R=d.documentElement,$=function(i){return d.getElementById(i)},m=R.getAttribute('data-mode'),go=$('go'),st=$('st'),sx=$('sx'),sc=$('sc'),t=0;
+var h=(location.hostname||'').toLowerCase();if(h)$('wh').textContent=h;
+if(location.pathname==='/')$('hm').hidden=true;
+sc.addEventListener('click',function(){sc.classList.remove('try');void sc.offsetWidth;sc.classList.add('try');clearTimeout(t);t=setTimeout(function(){sc.classList.remove('try')},1400)});
+function say(x){st.hidden=!x;sx.textContent=x||''}
+function back(){sc.classList.add('back');say('It’s back. Coming in…');setTimeout(function(){location.reload()},900)}
+if(m==='back'){go.addEventListener('click',function(){history.length>1?history.back():location.assign('/')});return}
+if(m==='none'){go.hidden=true;return}
+if(m==='wait'){var n=10;go.disabled=true;(function c(){if(n<=0){go.disabled=false;go.textContent='Try again';say('');return}go.textContent='Try again in '+n;n--;setTimeout(c,1000)})();go.addEventListener('click',function(){location.reload()});return}
+if(m!=='retry'){go.addEventListener('click',function(){location.reload()});return}
+// retry: knock (HEAD this URL) with a growing gap; come in once it stops answering 502-504.
+var k=0,w=[2,3,5,8,13],T0=Date.now(),busy=0,tm=0;
+function knock(){if(busy)return;busy=1;fetch(location.href,{method:'HEAD',cache:'no-store',credentials:'same-origin',redirect:'manual'}).then(function(r){busy=0;if(r.type==='opaqueredirect'||[502,503,504].indexOf(r.status)<0)back();else next()}).catch(function(){busy=0;next()})}
+function next(){if(Date.now()-T0>6e5){say('Still nobody home. Try again in a while.');go.disabled=false;return}var s=w[Math.min(k++,w.length-1)];say('Knocking again in '+s+'s…');tm=setTimeout(knock,s*1000)}
+go.addEventListener('click',function(){clearTimeout(tm);k=0;T0=Date.now();say('Knocking…');knock()});
+next()})();
+</script>
+</body>
+</html>

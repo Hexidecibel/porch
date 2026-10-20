@@ -1,0 +1,89 @@
+#!/bin/bash
+# Collect form submissions via a web form URL
+# Usage: bin/form <name> --fields "name:text,email:email,role:select:eng:design:pm,feedback:textarea"
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: form <name> --fields <field-spec>"
+  echo ""
+  echo "Collect form submissions via a web form URL."
+  echo ""
+  echo "Field spec DSL: comma-separated fields as name:type[:option1:option2:...]"
+  echo "  Types: text, email, number, textarea, select (with options), checkbox"
+  echo ""
+  echo "Examples:"
+  echo "  form survey --fields 'name:text,email:email,feedback:textarea'"
+  echo "  form signup --fields 'name:text,role:select:eng:design:pm,agree:checkbox'"
+  echo ""
+  echo "Submissions are saved as a JSON array to <dir>/<name>.json, where <dir> is"
+  echo "the per-user 0700 \$XDG_RUNTIME_DIR/porch/form (or /tmp/porch-\$UID/form)."
+  echo "The exact path is printed on launch."
+  exit 0
+fi
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  echo "Usage: form <name> --fields <field-spec>" >&2
+  exit 1
+fi
+# $NAME becomes <runtime-dir>/form/$NAME.json as well as the subdomain.
+tunnel_require_valid_name "$NAME"
+shift
+
+FIELDS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fields)
+      FIELDS="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$FIELDS" ]; then
+  echo "Error: --fields is required" >&2
+  echo "Usage: form <name> --fields <field-spec>" >&2
+  exit 1
+fi
+
+# Per-user 0700 output dir (was the shared /tmp/form, where the lock/temp
+# files could be pre-planted as symlinks). lib/rundir.py verifies owner+mode.
+FORM_DIR="$(python3 "$TUNNEL_DIR/lib/rundir.py" form)" || exit 1
+OUTPUT_FILE="$FORM_DIR/${NAME}.json"
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Start form server in the background
+python3 "$TUNNEL_DIR/lib/formserver.py" --port "$PORT" --name "$NAME" --fields "$FIELDS" --output "$OUTPUT_FILE" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+tunnel_state_register "$NAME" "form" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "Form: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo "Submissions: $OUTPUT_FILE"
+echo ""
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

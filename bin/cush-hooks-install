@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# Install / uninstall / check the cush-tools pre-commit hook.
+#
+# Usage:
+#   bin/cush-hooks-install                    Install in current git repo
+#   bin/cush-hooks-install <repo-path>        Install in specified repo
+#   bin/cush-hooks-install --global           Install via core.hooksPath (system-wide)
+#   bin/cush-hooks-install --uninstall        Remove (current repo or --global)
+#   bin/cush-hooks-install --check            Report install status
+#   bin/cush-hooks-install -h | --help        Show this help
+
+set -euo pipefail
+
+CUSH_TOOLS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+HOOK_SRC="$CUSH_TOOLS_DIR/hooks/pre-commit-cush"
+HOOK_MARKER="# cush-tools-hook"
+GLOBAL_HOOKS_DIR="${HOME}/.config/cush-tools/git-hooks"
+
+usage() {
+  cat <<EOF
+Usage: cush-hooks-install [options] [repo-path]
+
+Install the cush-tools pre-commit hook (blocks .env / secrets, optionally
+runs gitleaks).
+
+Options:
+  (no args)        Install in the current git repo (./.git/hooks/pre-commit)
+  <repo-path>      Install in the given repo
+  --global         Install via git's core.hooksPath (covers all repos)
+  --uninstall      Remove the hook (current repo, or --global if combined)
+  --check          Report install status
+  -h, --help       Show this help
+
+Examples:
+  bin/cush-hooks-install
+  bin/cush-hooks-install ~/code/myproject
+  bin/cush-hooks-install --global
+  bin/cush-hooks-install --uninstall
+  bin/cush-hooks-install --uninstall --global
+  bin/cush-hooks-install --check
+EOF
+}
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+# Find the .git hooks directory for a given repo path.
+repo_hooks_dir() {
+  local repo="$1"
+  ( cd "$repo" && git rev-parse --git-path hooks 2>/dev/null ) \
+    || die "$repo is not a git repo"
+}
+
+is_our_hook() {
+  local path="$1"
+  [ -e "$path" ] || return 1
+  # Either a symlink pointing at our source, or a file whose 2nd line
+  # contains our marker.
+  if [ -L "$path" ]; then
+    local target
+    target="$(readlink -f "$path" 2>/dev/null || readlink "$path")"
+    [ "$target" = "$HOOK_SRC" ] && return 0
+    # Even if target moved, if it's still cush-tools-hook content, treat as ours.
+  fi
+  if [ -r "$path" ] && head -n 2 "$path" 2>/dev/null | grep -q "$HOOK_MARKER"; then
+    return 0
+  fi
+  return 1
+}
+
+install_per_repo() {
+  local repo="${1:-.}"
+  repo="$(cd "$repo" && pwd)"
+  local hooks_dir
+  hooks_dir="$(repo_hooks_dir "$repo")"
+  # git rev-parse --git-path returns a path relative to repo root sometimes.
+  case "$hooks_dir" in
+    /*) ;;
+    *) hooks_dir="$repo/$hooks_dir" ;;
+  esac
+  mkdir -p "$hooks_dir"
+  local target="$hooks_dir/pre-commit"
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if is_our_hook "$target"; then
+      # Refresh the symlink to the current cush-tools path.
+      rm -f "$target"
+    else
+      die "$target already exists and is not a cush-tools hook.
+Back it up first, or use --global to chain via core.hooksPath:
+  mv $target $target.bak
+  bin/cush-hooks-install"
+    fi
+  fi
+
+  ln -s "$HOOK_SRC" "$target"
+  chmod +x "$HOOK_SRC"
+  echo "Installed: $target -> $HOOK_SRC"
+}
+
+uninstall_per_repo() {
+  local repo="${1:-.}"
+  repo="$(cd "$repo" && pwd)"
+  local hooks_dir
+  hooks_dir="$(repo_hooks_dir "$repo")"
+  case "$hooks_dir" in
+    /*) ;;
+    *) hooks_dir="$repo/$hooks_dir" ;;
+  esac
+  local target="$hooks_dir/pre-commit"
+
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    echo "Not installed: $target does not exist."
+    return 0
+  fi
+
+  if ! is_our_hook "$target"; then
+    die "$target is not a cush-tools hook; refusing to remove."
+  fi
+
+  rm -f "$target"
+  echo "Uninstalled: $target"
+}
+
+install_global() {
+  mkdir -p "$GLOBAL_HOOKS_DIR"
+  local target="$GLOBAL_HOOKS_DIR/pre-commit"
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    rm -f "$target"
+  fi
+
+  ln -s "$HOOK_SRC" "$target"
+  chmod +x "$HOOK_SRC"
+  git config --global core.hooksPath "$GLOBAL_HOOKS_DIR"
+  echo "Installed globally: $target -> $HOOK_SRC"
+  echo "git config --global core.hooksPath = $GLOBAL_HOOKS_DIR"
+  echo ""
+  echo "Now active for ALL git repos on this machine. Repos with their own"
+  echo ".git/hooks/pre-commit will override this — run 'bin/cush-hooks-install'"
+  echo "in those individually."
+}
+
+uninstall_global() {
+  local target="$GLOBAL_HOOKS_DIR/pre-commit"
+  local current
+  current="$(git config --global --get core.hooksPath 2>/dev/null || true)"
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if is_our_hook "$target"; then
+      rm -f "$target"
+      echo "Removed: $target"
+    else
+      echo "Skip: $target is not a cush-tools hook." >&2
+    fi
+  fi
+
+  if [ "$current" = "$GLOBAL_HOOKS_DIR" ]; then
+    git config --global --unset core.hooksPath
+    echo "Unset: git config --global core.hooksPath"
+  fi
+}
+
+check_status() {
+  # Per-repo (if we're inside a git repo).
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    local hooks_dir
+    hooks_dir="$(git rev-parse --git-path hooks)"
+    case "$hooks_dir" in
+      /*) ;;
+      *) hooks_dir="$(pwd)/$hooks_dir" ;;
+    esac
+    local target="$hooks_dir/pre-commit"
+    if [ -L "$target" ] || [ -e "$target" ]; then
+      if is_our_hook "$target"; then
+        local link_target=""
+        if [ -L "$target" ]; then
+          link_target="$(readlink "$target" 2>/dev/null || true)"
+        fi
+        if [ -n "$link_target" ] && [ "$link_target" != "$HOOK_SRC" ]; then
+          echo "installed but outdated (per-repo): $target -> $link_target (expected $HOOK_SRC)"
+        else
+          echo "installed (per-repo): $target"
+        fi
+      else
+        echo "not installed (per-repo hook present but not cush-tools): $target"
+      fi
+    else
+      echo "not installed (per-repo): $target"
+    fi
+  else
+    echo "not in a git repo (skipping per-repo check)"
+  fi
+
+  # Global.
+  local current
+  current="$(git config --global --get core.hooksPath 2>/dev/null || true)"
+  if [ -n "$current" ]; then
+    local gtarget="$current/pre-commit"
+    if [ -L "$gtarget" ] || [ -e "$gtarget" ]; then
+      if is_our_hook "$gtarget"; then
+        local link_target=""
+        if [ -L "$gtarget" ]; then
+          link_target="$(readlink "$gtarget" 2>/dev/null || true)"
+        fi
+        if [ -n "$link_target" ] && [ "$link_target" != "$HOOK_SRC" ]; then
+          echo "installed but outdated (global): $gtarget -> $link_target (expected $HOOK_SRC)"
+        else
+          echo "installed (global at $current)"
+        fi
+      else
+        echo "global core.hooksPath set to $current but pre-commit is not a cush-tools hook"
+      fi
+    else
+      echo "global core.hooksPath set to $current but no pre-commit hook present"
+    fi
+  else
+    echo "not installed (global): core.hooksPath unset"
+  fi
+}
+
+# ---- arg parsing ----
+
+mode="install"
+scope="repo"
+repo_path=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --global) scope="global" ;;
+    --uninstall) mode="uninstall" ;;
+    --check) mode="check" ;;
+    --) shift; break ;;
+    -*) die "unknown option: $1" ;;
+    *)
+      if [ -n "$repo_path" ]; then
+        die "unexpected argument: $1"
+      fi
+      repo_path="$1"
+      ;;
+  esac
+  shift
+done
+
+[ -f "$HOOK_SRC" ] || die "hook source not found: $HOOK_SRC"
+chmod +x "$HOOK_SRC" 2>/dev/null || true
+
+case "$mode" in
+  check)
+    check_status
+    ;;
+  install)
+    if [ "$scope" = "global" ]; then
+      [ -z "$repo_path" ] || die "--global takes no repo path"
+      install_global
+    else
+      install_per_repo "${repo_path:-.}"
+    fi
+    ;;
+  uninstall)
+    if [ "$scope" = "global" ]; then
+      [ -z "$repo_path" ] || die "--global takes no repo path"
+      uninstall_global
+    else
+      uninstall_per_repo "${repo_path:-.}"
+    fi
+    ;;
+esac

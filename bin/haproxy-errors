@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# haproxy-errors — install the Porch error pages HAProxy answers with itself.
+#
+# Usage: bin/haproxy-errors [--dry-run] [--yes]
+#
+# Builds lib/porch_errors.py's pages (400 403 408 429 500 502 503 504) and
+# installs them to /etc/haproxy/errors/porch/<code>.http, then points the
+# config's `errorfile` lines (first defaults section) there, adding any that
+# are missing (429 is not in the stock config). The stock Debian files in
+# /etc/haproxy/errors/ are left alone. The config change goes through
+# bin/haproxy-apply (haproxy -c, diff, backup, graceful reload, rollback); a
+# page-only change is checked with haproxy -c and reloaded. The previous
+# pages are backed up to /etc/haproxy/backups/errors-porch.<ts>/ and put back
+# if the reload fails. Idempotent.
+# --dry-run builds, validates a candidate that reads the freshly built pages,
+# and shows what would change; nothing is installed.
+# PORCH_HAPROXY_CFG=<file> works on another config (tests; --dry-run only).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$SCRIPT_DIR/.."
+DEST=/etc/haproxy/errors/porch
+LIVE=/etc/haproxy/haproxy.cfg
+BACKUPS=/etc/haproxy/backups
+DRY=""; YES=""
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY=1 ;;
+        --yes) YES=--yes ;;
+        -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown argument: $a" >&2; exit 2 ;;
+    esac
+done
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+chmod 755 "$TMP"
+SUDO=sudo
+if [[ -n "${PORCH_HAPROXY_CFG:-}" ]]; then
+    [[ -n "$DRY" ]] || { echo "PORCH_HAPROXY_CFG works with --dry-run only" >&2; exit 2; }
+    SUDO=""
+    cat "$PORCH_HAPROXY_CFG" > "$TMP/live.cfg"
+else
+    sudo cat "$LIVE" > "$TMP/live.cfg"
+fi
+
+echo "→ building the pages"
+python3 "$REPO/lib/porch_errors.py" build --out "$TMP/errors" >/dev/null
+python3 "$REPO/lib/porch_errors.py" check "$TMP/errors"
+chmod 755 "$TMP/errors"
+
+# The candidate config: errorfile lines -> $DEST (and a copy that reads the
+# freshly built pages, for validating before anything is installed).
+PYTHONPATH="$REPO/lib" python3 - "$TMP/live.cfg" "$TMP/candidate.cfg" "$TMP/check.cfg" "$DEST" "$TMP/errors" <<'EOF'
+import re, sys
+import porch_errors
+src, dst, chk, dest, built = sys.argv[1:]
+lines = open(src).read().split("\n")
+start = next((i for i, l in enumerate(lines) if re.match(r"^defaults\b", l)), None)
+if start is None:
+    sys.exit("✗ no defaults section in the config")
+end = next((i for i in range(start + 1, len(lines))
+            if re.match(r"^(global|defaults|frontend|backend|listen|userlist|peers|resolvers|"
+                        r"mailers|program|http-errors|ring|cache)\b", lines[i])), len(lines))
+want = {c: f"\terrorfile {c} {dest}/{c}.http" for c in porch_errors.CODES}
+hits = [(i, int(m.group(1))) for i in range(start + 1, end)
+        for m in [re.match(r"^\s*errorfile\s+(\d{3})\s+\S+\s*$", lines[i])] if m]
+idx = [i for i, _ in hits]
+if hits and idx == list(range(idx[0], idx[-1] + 1)):
+    # One block (the usual layout): ours in code order, then any others kept.
+    others = [lines[i] for i, c in hits if c not in want]
+    lines[idx[0]:idx[-1] + 1] = [want[c] for c in porch_errors.CODES] + others
+else:
+    seen = set()
+    for i, c in hits:
+        if c in want:
+            lines[i] = want[c]
+            seen.add(c)
+    missing = [want[c] for c in porch_errors.CODES if c not in seen]
+    at = (idx[-1] + 1) if idx else end
+    while not idx and at > start + 1 and not lines[at - 1].strip():
+        at -= 1
+    lines[at:at] = missing
+open(dst, "w").write("\n".join(lines))
+open(chk, "w").write("\n".join(lines).replace(f" {dest}/", f" {built}/"))
+EOF
+
+changed_files=()
+for f in "$TMP"/errors/*.http; do
+    n="$(basename "$f")"
+    if ! $SUDO cmp -s "$f" "$DEST/$n" 2>/dev/null; then changed_files+=("$n"); fi
+done
+cfg_changed=""
+cmp -s "$TMP/live.cfg" "$TMP/candidate.cfg" || cfg_changed=1
+
+echo "→ pages that would change in $DEST: ${changed_files[*]:-none}"
+if [[ -n "$cfg_changed" ]]; then
+    echo "→ config changes:"
+    diff -u "$TMP/live.cfg" "$TMP/candidate.cfg" || true
+else
+    echo "→ config already points at $DEST"
+fi
+
+echo "→ validating"
+if ! $SUDO haproxy -c -q -f "$TMP/check.cfg"; then
+    echo "✗ candidate does not validate; nothing installed" >&2
+    exit 1
+fi
+echo "✓ candidate validates"
+
+if [[ -n "$DRY" ]]; then
+    echo "(dry run: nothing installed)"
+    exit 0
+fi
+if [[ ${#changed_files[@]} -eq 0 && -z "$cfg_changed" ]]; then
+    echo "✓ nothing to do"
+    exit 0
+fi
+if [[ "$YES" != "--yes" ]]; then
+    read -r -p "Install the pages and reload HAProxy? [y/N] " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
+fi
+
+TS="$(date +%Y%m%d-%H%M%S)"
+BK=""
+if sudo test -d "$DEST"; then
+    BK="$BACKUPS/errors-porch.$TS"
+    sudo mkdir -p "$BACKUPS"
+    sudo cp -a "$DEST" "$BK"
+    echo "→ backed up $DEST to $BK"
+fi
+restore_pages() {
+    if [[ -n "$BK" ]]; then
+        sudo rm -rf "$DEST" && sudo cp -a "$BK" "$DEST"
+        echo "→ put the previous pages back" >&2
+    fi
+}
+sudo install -d -m 755 -o root -g root "$DEST"
+for f in "$TMP"/errors/*.http; do
+    sudo install -m 644 -o root -g root "$f" "$DEST/$(basename "$f")"
+done
+echo "→ installed $(ls "$TMP"/errors | wc -l) pages in $DEST"
+
+if [[ -n "$cfg_changed" ]]; then
+    if ! "$SCRIPT_DIR/haproxy-apply" "$TMP/candidate.cfg" --yes; then
+        restore_pages
+        exit 1
+    fi
+    exit 0
+fi
+if sudo haproxy -c -q -f "$LIVE" && sudo systemctl reload haproxy && sleep 1 \
+        && systemctl is-active --quiet haproxy; then
+    echo "✓ pages installed and HAProxy reloaded"
+    exit 0
+fi
+echo "✗ reload failed" >&2
+restore_pages
+sudo systemctl reload haproxy || sudo systemctl restart haproxy
+exit 1

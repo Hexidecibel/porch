@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<title>Porch setup</title>
+{{PORCH_CSS}}
+<link rel="stylesheet" href="/static/wizard.css">
+<script nonce="{{NONCE}}" src="/static/wizard.js" defer></script>
+</head>
+<body>
+<div class="w-app">
+  <header class="p-bar w-bar">
+    <div class="p-brand">{{MARK}}<span>porch</span><small id="host">setup</small></div>
+    <div class="w-bar-right">
+      <span id="live" class="p-badge p-badge--dot">Connecting</span>
+    </div>
+  </header>
+
+  <section id="gate" class="w-gate" hidden>
+    <div class="p-card w-gate-card">
+      <p class="p-kicker">Porch setup</p>
+      <h1 class="p-title p-title--sm" id="gate-title">Opening the wizard</h1>
+      <p class="p-lede" id="gate-text">Checking your link.</p>
+    </div>
+  </section>
+
+  <div id="main" class="w-layout" hidden>
+    <aside class="w-rail" aria-label="Setup steps">
+      <details id="rail" class="w-rail-box" open>
+        <summary class="w-rail-sum">
+          <span class="w-rail-head">
+            <span class="w-rail-title">Steps</span>
+            <span id="rail-count" class="p-small">0 of 0</span>
+          </span>
+          <span class="p-progress w-rail-bar"><span id="rail-fill"></span></span>
+          <span id="rail-current" class="w-rail-current p-small"></span>
+        </summary>
+        <ol id="steps" class="w-steps"></ol>
+      </details>
+    </aside>
+
+    <main class="w-main">
+      <section id="intro" class="p-card w-intro">
+        <p class="p-kicker">Set up this server</p>
+        <h1 class="p-title">Light the porch</h1>
+        <p class="p-lede" id="intro-lede">Porch walks through every step: your domain, how the internet reaches this box, DNS, the certificate and the services. Each step checks before it changes anything, and every change can be undone.</p>
+        <div class="w-actions">
+          <button type="button" class="p-btn p-btn--lg" id="btn-run">Start setup</button>
+          <button type="button" class="p-btn p-btn--ghost p-btn--lg" id="btn-resume" hidden>Continue setup</button>
+          <button type="button" class="p-btn p-btn--ghost p-btn--lg" id="btn-adopt">Check an existing install</button>
+        </div>
+        <label class="w-switch">
+          <input type="checkbox" id="opt-dry">
+          <span class="w-switch-track" aria-hidden="true"></span>
+          <span><b>Dry run</b><span class="p-small w-block">Show what each step would do; change nothing.</span></span>
+        </label>
+        <div class="w-intro-foot">
+          <button type="button" class="p-btn p-btn--quiet p-btn--sm w-undo" id="btn-rollback">Undo setup</button>
+        </div>
+      </section>
+
+      <section id="busy" class="p-card w-busy" hidden aria-live="polite">
+        <span class="w-spinner" aria-hidden="true"></span>
+        <div class="w-busy-text">
+          <p class="w-busy-title" id="busy-title">Working</p>
+          <p class="p-small" id="busy-sub"></p>
+        </div>
+      </section>
+
+      <section id="prompt" class="p-card w-prompt" hidden aria-live="polite">
+        <p class="p-kicker" id="prompt-kicker"></p>
+        <h2 class="p-title p-title--sm" id="prompt-title"></h2>
+        <form id="prompt-form" class="w-form" novalidate>
+          <div id="prompt-fields" class="w-fields"></div>
+          <div id="prompt-error" class="p-notice p-notice--error" hidden></div>
+          <div class="w-actions">
+            <button type="submit" class="p-btn p-btn--lg" id="prompt-submit">Continue</button>
+            <button type="button" class="p-btn p-btn--quiet" id="prompt-cancel">Stop here</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="phone" class="p-card w-phone" hidden>
+        <div class="w-qr" id="qr" aria-hidden="true"></div>
+        <div class="w-phone-text">
+          <p class="p-kicker">Phone check</p>
+          <h2 class="p-title p-title--sm">Open this on cellular</h2>
+          <p class="p-lede">Turn Wi-Fi off on your phone, then scan the code or open the link. It proves the internet can reach this box.</p>
+          <p class="w-url p-mono" id="phone-url"></p>
+          <p class="p-small w-waiting"><span class="w-dot" aria-hidden="true"></span>Waiting for your phone</p>
+        </div>
+      </section>
+
+      <section id="result" class="w-result" hidden aria-live="polite"></section>
+
+      <section class="w-log-box" aria-label="Activity">
+        <div class="w-log-head">
+          <h2 class="p-h2">Activity</h2>
+          <label class="w-check p-small"><input type="checkbox" id="opt-all"> Show passing checks</label>
+        </div>
+        <ol id="log" class="w-log"></ol>
+        <p id="log-empty" class="p-small w-log-empty">Nothing yet. Start a run and every check, change and message shows up here.</p>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="confirm" class="w-dialog" aria-labelledby="confirm-text">
+    <form method="dialog" class="w-dialog-body">
+      <p class="p-kicker" id="confirm-kicker">Confirm</p>
+      <p class="w-dialog-text" id="confirm-text"></p>
+      <div class="w-actions w-actions--end">
+        <button type="button" class="p-btn p-btn--ghost" id="confirm-no">No</button>
+        <button type="button" class="p-btn" id="confirm-yes">Yes</button>
+      </div>
+    </form>
+  </dialog>
+</div>
+</body>
+</html>

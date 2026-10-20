@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -e
+
+# certbot-auth-hook — DNS-01 auth hook for *.tunnel.cush.rocks
+# Called by certbot as --manual-auth-hook. Creates a TXT record on
+# _acme-challenge.tunnel.cush.rocks via the name.com API, then waits
+# for it to be resolvable before returning.
+
+# name.com API credentials: $NAMECOM_CREDENTIALS, else ~/.config/namecom/credentials.
+# certbot runs hooks as root (sudo, or its renewal timer), where ~ is /root, so
+# as root "~" is the home of the user who owns this checkout.
+_cred_home="$HOME"
+if [[ "$(id -u)" == 0 ]]; then
+    _owner="$(stat -c %U "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    _cred_home="$(getent passwd "$_owner" 2>/dev/null | cut -d: -f6)"
+    _cred_home="${_cred_home:-$HOME}"
+fi
+CREDENTIALS="${NAMECOM_CREDENTIALS:-$_cred_home/.config/namecom/credentials}"
+DOMAIN="cush.rocks"
+HOST="_acme-challenge.tunnel"
+API_BASE="https://api.name.com"
+
+# ── Load credentials ─────────────────────────────────────────────────
+if [[ ! -f "$CREDENTIALS" ]]; then
+  echo "ERROR: Credentials file not found at $CREDENTIALS" >&2
+  exit 1
+fi
+source "$CREDENTIALS"
+
+# ── Create TXT record via name.com API ───────────────────────────────
+echo "Creating TXT record: ${HOST}.${DOMAIN} = ${CERTBOT_VALIDATION}"
+
+RESPONSE=$(curl -s -w "\n%{http_code}" \
+  -u "${NAMECOM_USER}:${NAMECOM_TOKEN}" \
+  -X POST "${API_BASE}/v4/domains/${DOMAIN}/records" \
+  -H "Content-Type: application/json" \
+  -d "{\"host\": \"${HOST}\", \"type\": \"TXT\", \"answer\": \"${CERTBOT_VALIDATION}\", \"ttl\": 300}")
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+  echo "ERROR: name.com API returned HTTP ${HTTP_CODE}" >&2
+  echo "$BODY" >&2
+  exit 1
+fi
+
+echo "TXT record created successfully (HTTP ${HTTP_CODE})"
+
+# ── Wait for DNS propagation ─────────────────────────────────────────
+FQDN="${HOST}.${DOMAIN}"
+MAX_WAIT=120
+INTERVAL=10
+ELAPSED=0
+
+echo "Waiting for ${FQDN} TXT record to propagate (up to ${MAX_WAIT}s)..."
+
+while [[ $ELAPSED -lt $MAX_WAIT ]]; do
+  RESULT=$(dig +short TXT "${FQDN}" @8.8.8.8 2>/dev/null || true)
+  if echo "$RESULT" | grep -qF "$CERTBOT_VALIDATION"; then
+    echo "TXT record is resolvable after ${ELAPSED}s"
+    exit 0
+  fi
+  sleep "$INTERVAL"
+  ELAPSED=$((ELAPSED + INTERVAL))
+  echo "  ...${ELAPSED}s elapsed, still waiting"
+done
+
+echo "WARNING: TXT record not resolvable after ${MAX_WAIT}s — proceeding anyway" >&2
+exit 0

@@ -1,0 +1,36 @@
+# frps for Porch, rendered by lib/porch_setup/render.py (porch render frps).
+# 0600: it holds the dashboard password.
+bindAddr = "0.0.0.0"
+bindPort = ${frp_port}
+# Every proxy listener (the vhost port and any tcp remote port) is loopback
+# only: HAProxy is the one way in.
+proxyBindAddr = "127.0.0.1"
+vhostHTTPPort = ${frp_vhost_port}
+
+webServer.addr = "127.0.0.1"
+webServer.port = ${frp_dashboard_port}
+webServer.user = "admin"
+webServer.password = "${frp_dashboard_password}"
+
+# Per-device auth is the HTTP plugin below; frp still wants a (shared, empty)
+# token configured on both sides.
+auth.method = "token"
+auth.token = ""
+
+subDomainHost = "${tunnel_base}"
+
+# A tunnel name with no live door gets the Porch closed-door page
+# (site/door-closed.html, rendered by bin/deploy; read per request).
+custom404Page = "${web_root}/door-closed.html"
+
+log.to = "${repo_dir}/logs/frps.log"
+log.level = "info"
+log.maxDays = 7
+
+# Login, NewProxy, NewWorkConn and Ping all go to the auth server, so a
+# revoked device is cut off at its next heartbeat (lib/authserver.py).
+[[httpPlugins]]
+name = "device-auth"
+addr = "127.0.0.1:${auth_port}"
+path = "/verify"
+ops = ["Login", "NewProxy", "NewWorkConn", "Ping"]

@@ -1,0 +1,106 @@
+#!/bin/bash
+# Send push notifications via ntfy.sh
+# Usage: notify "message"
+# Usage: notify "message" --title "Title" --priority high --tags warning
+# Usage: echo "message" | notify --title "Title"
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+CONFIG_FILE="$HOME/.config/cush-tools/notify.conf"
+
+# Help
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: notify [options] [message]"
+  echo ""
+  echo "Send push notifications via ntfy.sh"
+  echo ""
+  echo "Options:"
+  echo "  --title TEXT       Notification title"
+  echo "  --priority LEVEL   low, default, high, or urgent"
+  echo "  --tags TAGS        Comma-separated emoji shortcodes (e.g. warning,skull)"
+  echo "  -h, --help         Show this help"
+  echo ""
+  echo "Examples:"
+  echo "  notify \"Build finished\""
+  echo "  notify \"Deploy failed\" --title \"Alert\" --priority high"
+  echo "  notify --tags warning \"Something happened\""
+  echo "  echo \"long message\" | notify --title \"Report\""
+  echo ""
+  echo "Config: $CONFIG_FILE"
+  exit 0
+fi
+
+# Load config
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "No ntfy topic configured. To set up:"
+  echo "  1. Install ntfy app on your phone (https://ntfy.sh)"
+  echo "  2. Subscribe to a topic name of your choice"
+  echo "  3. Run: mkdir -p ~/.config/cush-tools && echo 'NTFY_TOPIC=your-topic' > ~/.config/cush-tools/notify.conf"
+  exit 1
+fi
+
+source "$CONFIG_FILE"
+
+if [ -z "$NTFY_TOPIC" ]; then
+  echo "Error: NTFY_TOPIC not set in $CONFIG_FILE"
+  exit 1
+fi
+
+NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+
+# Parse flags
+TITLE=""
+PRIORITY=""
+TAGS=""
+POSITIONAL=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --title)
+      TITLE="$2"
+      shift 2
+      ;;
+    --priority)
+      PRIORITY="$2"
+      shift 2
+      ;;
+    --tags)
+      TAGS="$2"
+      shift 2
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# Message from positional args or stdin
+if [ ${#POSITIONAL[@]} -gt 0 ]; then
+  MESSAGE="${POSITIONAL[*]}"
+elif [ ! -t 0 ]; then
+  MESSAGE="$(cat)"
+else
+  echo "Error: No message provided"
+  echo "Usage: notify [options] \"message\""
+  exit 1
+fi
+
+# Build curl headers
+HEADERS=()
+[ -n "$TITLE" ] && HEADERS+=(-H "Title: $TITLE")
+[ -n "$PRIORITY" ] && HEADERS+=(-H "Priority: $PRIORITY")
+[ -n "$TAGS" ] && HEADERS+=(-H "Tags: $TAGS")
+
+# Send notification
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  "${HEADERS[@]}" \
+  -d "$MESSAGE" \
+  "$NTFY_SERVER/$NTFY_TOPIC")
+
+if [ "$HTTP_CODE" = "200" ]; then
+  echo "Sent."
+else
+  echo "Failed (HTTP $HTTP_CODE)"
+  exit 1
+fi

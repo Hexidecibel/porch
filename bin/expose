@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+# cush-tools: expose a local port as a permanent subdomain on *.cush.rocks
+#
+# Usage: expose <subdomain> <port> [--expo <project-path>]
+#
+# Examples:
+#   expose myapi 9500                       # Expose http://localhost:9500 at https://myapi.cush.rocks
+#   expose myapp 9485 --expo ~/src/myapp    # Same + starts Expo with proxy URL set
+#
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+cush-tools expose — create a permanent *.cush.rocks subdomain for a local service
+
+Usage:
+  expose <subdomain> <port> [--expo <project-path>]
+  expose <subdomain> --remove
+
+Arguments:
+  <subdomain>       Subdomain (e.g. 'myapi' → https://myapi.cush.rocks)
+  <port>            Local port the service listens on
+
+Options:
+  --expo <path>     Also start an Expo dev server in <path> with the right env vars
+                    (REACT_NATIVE_PACKAGER_HOSTNAME, EXPO_PACKAGER_PROXY_URL)
+  --remove          Remove the subdomain config and delete the cert
+
+Examples:
+  expose myapi 9500
+  expose hexbooth-app 9485 --expo ~/local/src/hexbooth/apps/mobile
+  expose myapi --remove
+
+This tool:
+  1. Issues a Let's Encrypt cert via certbot (HTTP-01 on port 9785)
+  2. Adds HAProxy ACL + backend for <subdomain>.cush.rocks → 127.0.0.1:<port>
+  3. Reloads HAProxy
+  4. Optionally starts Expo with the proxy URL env vars set
+
+Requires sudo for HAProxy + certbot changes.
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+esac
+
+SUBDOMAIN="$1"
+shift
+
+PORT=""
+EXPO_PATH=""
+REMOVE=false
+
+# Second arg is port unless it's a flag
+if [[ $# -gt 0 && "${1:-}" != --* ]]; then
+  PORT="$1"
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --expo)
+      EXPO_PATH="$2"
+      shift 2
+      ;;
+    --remove)
+      REMOVE=true
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+# Everything below splices $SUBDOMAIN into sed expressions, into python
+# heredocs that rewrite /etc/haproxy/haproxy.cfg as root, and into paths under
+# /etc/ssl that get `sudo rm -f`'d. A subdomain is a DNS label; anything else
+# was never going to resolve anyway, so reject it here rather than defend
+# against it at a dozen call sites.
+if ! [[ "$SUBDOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || [ "${#SUBDOMAIN}" -gt 63 ]; then
+  echo "[expose] Invalid subdomain: $SUBDOMAIN" >&2
+  echo "[expose] Use 1-63 chars of [A-Za-z0-9-], not starting or ending with a hyphen." >&2
+  exit 1
+fi
+
+DOMAIN="$SUBDOMAIN.cush.rocks"
+HAPROXY_CFG="/etc/haproxy/haproxy.cfg"
+CERT_DIR="/etc/ssl/ssl-certs/cush.rocks"
+CERT_COMBINED="$CERT_DIR/$DOMAIN.pem"
+
+say()  { echo -e "\033[1;35m[expose]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[expose]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[expose]\033[0m $*" >&2; exit 1; }
+
+if $REMOVE; then
+  say "Removing $DOMAIN..."
+  # Strip ACL + use_backend lines
+  sudo sed -i "/acl[[:space:]]\+$SUBDOMAIN[[:space:]]\+hdr(host)[[:space:]]\+-i[[:space:]]\+$DOMAIN/d" "$HAPROXY_CFG"
+  sudo sed -i "/use_backend[[:space:]]\+$SUBDOMAIN[[:space:]]\+if[[:space:]]\+$SUBDOMAIN/d" "$HAPROXY_CFG"
+  # Remove backend block
+  sudo python3 - <<PYTHON
+import re
+path = "$HAPROXY_CFG"
+sub = "$SUBDOMAIN"
+with open(path) as f:
+    text = f.read()
+pattern = r'\nbackend ' + re.escape(sub) + r'\b.*?(?=\nbackend |\Z)'
+text = re.sub(pattern, '', text, flags=re.DOTALL)
+with open(path, 'w') as f:
+    f.write(text)
+PYTHON
+  if sudo haproxy -c -f "$HAPROXY_CFG" > /dev/null 2>&1; then
+    sudo systemctl reload haproxy
+    say "HAProxy reloaded"
+  else
+    warn "HAProxy config invalid after removal — manual fix needed"
+  fi
+  sudo rm -f "$CERT_COMBINED"
+  sudo certbot delete --cert-name "$DOMAIN" --non-interactive 2>&1 | tail -5 || true
+  say "Removed. $DOMAIN is gone."
+  exit 0
+fi
+
+if [[ -z "$PORT" ]]; then
+  die "Port is required. See: expose --help"
+fi
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+  die "Port must be numeric, got: $PORT"
+fi
+
+# 1. Update existing backend if present
+if sudo grep -q "^backend $SUBDOMAIN$" "$HAPROXY_CFG"; then
+  say "Backend '$SUBDOMAIN' already exists in HAProxy. Updating port to $PORT..."
+  sudo python3 - <<PYTHON
+import re
+path = "$HAPROXY_CFG"
+sub = "$SUBDOMAIN"
+port = "$PORT"
+with open(path) as f:
+    text = f.read()
+# Replace server line inside this backend block
+def repl(m):
+    head, body = m.group(1), m.group(2)
+    body = re.sub(
+        r'(server\s+' + re.escape(sub) + r'\s+127\.0\.0\.1:)\d+',
+        r'\g<1>' + port,
+        body,
+    )
+    return head + body
+text = re.sub(
+    r'(\nbackend ' + re.escape(sub) + r'\n)(.*?)(?=\nbackend |\Z)',
+    repl, text, flags=re.DOTALL,
+)
+with open(path, 'w') as f:
+    f.write(text)
+PYTHON
+  if sudo haproxy -c -f "$HAPROXY_CFG" > /dev/null 2>&1; then
+    sudo systemctl reload haproxy
+    say "Updated port to $PORT"
+  else
+    die "HAProxy config invalid after port update"
+  fi
+else
+  # 2. Issue cert (reuse existing if present)
+  if ! sudo test -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem"; then
+    say "Issuing Let's Encrypt cert for $DOMAIN..."
+    sudo certbot certonly \
+      --standalone \
+      --preferred-challenges http \
+      --http-01-port 9785 \
+      --non-interactive \
+      --agree-tos \
+      --email "$(whoami)@cush.rocks" \
+      -d "$DOMAIN" \
+      2>&1 | tail -10
+  else
+    say "Cert for $DOMAIN already exists, reusing"
+  fi
+
+  # 3. Build combined PEM for HAProxy
+  sudo mkdir -p "$CERT_DIR"
+  # Pass the paths as arguments rather than splicing them into the shell text
+  # that runs as root.
+  sudo sh -c 'cat "$1/fullchain.pem" "$1/privkey.pem" > "$2"' _ \
+    "/etc/letsencrypt/live/$DOMAIN" "$CERT_COMBINED"
+  sudo chmod 600 "$CERT_COMBINED"
+  say "Combined PEM written to $CERT_COMBINED"
+
+  # 4. Add ACL + use_backend + backend block
+  say "Updating HAProxy config..."
+  sudo python3 - <<PYTHON
+import re
+path = "$HAPROXY_CFG"
+sub = "$SUBDOMAIN"
+domain = "$DOMAIN"
+port = "$PORT"
+
+with open(path) as f:
+    text = f.read()
+
+acl_line         = f"\tacl {sub} hdr(host) -i {domain}\n"
+use_backend_line = f"\tuse_backend {sub} if {sub}\n"
+backend_block    = (
+    f"\nbackend {sub}\n"
+    f"\ttimeout server 5m\n"
+    f"\ttimeout tunnel 1h\n"
+    f"\toption http-server-close\n"
+    f"\thttp-request set-header X-Forwarded-Proto https\n"
+    f"\tserver {sub} 127.0.0.1:{port} check\n"
+)
+
+# 1) Insert ACL after the LAST acl-hdr(host) line in the www-https frontend.
+# Find the www-https frontend block first.
+fe_re = re.compile(r'(frontend www-https\b.*?)(?=\nfrontend |\nbackend |\Z)', re.DOTALL)
+m = fe_re.search(text)
+if not m:
+    raise SystemExit("Could not find 'frontend www-https' block in haproxy.cfg")
+fe_start, fe_end = m.start(1), m.end(1)
+fe_body = m.group(1)
+
+if f"acl {sub} " not in fe_body:
+    # Find last "acl X hdr(host)" line inside the frontend
+    acl_matches = list(re.finditer(r'^[ \t]*acl\s+\w+\s+hdr\(host\)[^\n]*\n', fe_body, re.MULTILINE))
+    if not acl_matches:
+        raise SystemExit("No existing acl hdr(host) lines found in frontend")
+    last_acl = acl_matches[-1]
+    insert_at_in_fe = last_acl.end()
+    fe_body = fe_body[:insert_at_in_fe] + acl_line + fe_body[insert_at_in_fe:]
+
+# 2) Insert use_backend after the LAST "use_backend X if X" line in the frontend.
+if f"use_backend {sub} if {sub}" not in fe_body:
+    ub_matches = list(re.finditer(r'^[ \t]*use_backend\s+\w+\s+if\s+\w+\s*\n', fe_body, re.MULTILINE))
+    if not ub_matches:
+        raise SystemExit("No existing use_backend lines found in frontend")
+    last_ub = ub_matches[-1]
+    insert_at_in_fe = last_ub.end()
+    fe_body = fe_body[:insert_at_in_fe] + use_backend_line + fe_body[insert_at_in_fe:]
+
+# Splice modified frontend back in
+text = text[:fe_start] + fe_body + text[fe_end:]
+
+# 3) Append backend block at EOF if absent
+if f"\nbackend {sub}\n" not in text:
+    text = text.rstrip() + "\n" + backend_block
+
+with open(path, 'w') as f:
+    f.write(text)
+PYTHON
+
+  # 5. Validate + reload
+  if sudo haproxy -c -f "$HAPROXY_CFG" > /dev/null 2>&1; then
+    sudo systemctl reload haproxy
+    say "HAProxy reloaded"
+  else
+    die "HAProxy config invalid after update — check $HAPROXY_CFG"
+  fi
+
+  say "$DOMAIN -> 127.0.0.1:$PORT is live"
+fi
+
+# 6. Optional: start Expo dev server
+if [[ -n "$EXPO_PATH" ]]; then
+  EXPO_PATH="${EXPO_PATH/#\~/$HOME}"
+  if [[ ! -d "$EXPO_PATH" ]]; then
+    die "Expo path not found: $EXPO_PATH"
+  fi
+  say "Starting Expo dev server in $EXPO_PATH..."
+
+  # Narrow: only node processes actually running `expo start`, and never this
+  # script or its parents. A bare `pkill -f "expo start"` also matches an
+  # editor, a grep, or the shell that typed the command.
+  for _p in $(pgrep -f "expo start" 2>/dev/null || true); do
+    [ "$_p" = "$$" ] && continue
+    case "$(ps -o comm= -p "$_p" 2>/dev/null)" in
+      node|npx|expo) kill "$_p" 2>/dev/null || true ;;
+    esac
+  done
+
+  LOG_FILE="/tmp/expose-$SUBDOMAIN.log"
+  (
+    cd "$EXPO_PATH"
+    EXPO_PACKAGER_PROXY_URL="https://$DOMAIN" \
+      REACT_NATIVE_PACKAGER_HOSTNAME="$DOMAIN" \
+      nohup npx expo start --port "$PORT" --host lan > "$LOG_FILE" 2>&1 &
+    disown
+  )
+
+  say "Expo started (log: $LOG_FILE)"
+  say ""
+  say "Open Expo Go on your phone and enter:"
+  say "  exp://$DOMAIN"
+fi
+
+say ""
+say "Done. https://$DOMAIN is live."

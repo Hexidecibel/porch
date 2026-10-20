@@ -1,0 +1,115 @@
+#!/bin/bash
+# Materialize a .env from a .cush-secrets manifest via 1Password.
+#
+# Looks for .cush-secrets in the current directory (walking up parent dirs,
+# git-style) and resolves each `op://Vault/Item/field` ref via the
+# 1Password CLI. Missing refs auto-spawn `bin/secure-entry --save-to-op`
+# tunnels so the user can fill them in via a web form; values are written
+# straight to 1Password and never touch chat.
+#
+# Defaults to writing ./.env at chmod 600. Use --env to emit eval-able
+# `export KEY=value` lines to stdout instead.
+#
+# Requires a 1Password service-account token in
+# ~/.config/cush-tools/op.env (see `bin/secure-entry --help` for setup).
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source both backend shims so OP_* and INFISICAL_* env vars are loaded into
+# this shell (and therefore inherited by python). Each shim is conditional on
+# its env file existing; sourcing them also runs cheap setup (no auth probe).
+# Auth is checked per-scheme inside Python now, based on the manifest's
+# actual ref schemes — so a manifest that only uses inf:// won't fail just
+# because op isn't configured, and vice versa.
+# shellcheck source=../lib/op.sh
+[ -f "$HOME/.config/cush-tools/op.env" ] && . "$TUNNEL_DIR/lib/op.sh"
+# shellcheck source=../lib/infisical.sh
+[ -f "$HOME/.config/cush-tools/infisical.env" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+
+show_help() {
+    cat <<'EOF'
+Usage: bin/inject [options]
+
+Materialize a .env file from a .cush-secrets manifest using 1Password.
+
+  bin/inject                    # walk up for .cush-secrets, write ./.env
+  bin/inject --check            # dry run; non-zero exit if anything missing
+  bin/inject --validate         # schema lint (no op calls); exit 2 if invalid
+  bin/inject --env              # print `export KEY=value` to stdout
+  bin/inject --no-prompt        # never auto-spawn; fail on any missing ref
+
+Options:
+  --manifest <path>          Path to .cush-secrets (default: parent walkup)
+  --out <path>               Output .env path (default: ./.env)
+  --env                      Emit eval-able exports to stdout, no .env file
+  --check                    Dry run; report status, exit 6 if any missing
+  --validate                 Schema-only validation; no op calls or spawn
+  --no-prompt                Don't auto-spawn forms; exit 6 on any missing
+  --allow-fallback           Use manifest fallbacks for missing values
+  --serial                   Spawn forms one at a time (default: parallel)
+  --max-parallel <n>         Cap on concurrent forms (default: 5)
+  --timeout <minutes>        Total wait timeout in minutes (default: 60)
+  --no-qr                    Suppress ASCII QR output
+  --json                     Machine-readable status output
+  -h, --help                 Show this help
+
+Exit codes:
+  0  ok / all resolved
+  2  argument or manifest error
+  3  1Password auth failure (missing op CLI / token / whoami failed)
+  4  1Password upstream error (vault inaccessible, network, etc)
+  5  user aborted (Ctrl-C while waiting on forms)
+  6  --no-prompt + missing refs, or --check found missing
+  7  .env write failed (permissions / world-writable parent / etc)
+  8  partial fulfillment (timeout reached with refs still missing)
+
+Manifest example (.cush-secrets):
+
+    schema = 1
+
+    [defaults]
+    target_vault   = "Personal"
+    target_item    = "{project}"     # {project} = parent dir basename
+    field_template = "{key}"
+
+    [secrets]
+    DATABASE_URL = "op://Personal/myapp/database_url"
+    STRIPE_KEY   = { ref = "op://Personal/myapp/stripe", fallback = "sk_test_dev" }
+    GITHUB_TOKEN = { ref = "op://Work/shared/gh_token" }
+
+    [secrets.WEIRD_ONE]
+    ref          = "op://Shared/legacy/api"
+    target_vault = "Shared"
+    required     = true
+
+The manifest is safe to commit — refs are pointers, not secrets. Add `.env`
+to your .gitignore (bin/inject does this automatically the first time it
+writes).
+
+1Password setup (one-time): see `~/.config/cush-tools/op.env` and
+https://developer.1password.com/docs/service-accounts/
+EOF
+}
+
+# Parse --help / -h before dispatching, so we can print without an op check.
+for a in "$@"; do
+    case "$a" in
+        -h|--help) show_help; exit 0 ;;
+    esac
+done
+
+# Look for --self-test (developer escape hatch — bypasses op check).
+for a in "$@"; do
+    if [ "$a" = "--self-test" ]; then
+        exec python3 "$TUNNEL_DIR/lib/inject.py" --self-test
+    fi
+done
+
+# Forward all args to lib/inject.py. The python layer handles flag parsing,
+# manifest loading, AND per-scheme auth probing — so adding a new backend or
+# a new flag only requires a python edit, not a bash edit. --validate and
+# --self-test are handled inside the python layer too (validate skips the
+# auth probe entirely).
+exec python3 "$TUNNEL_DIR/lib/inject.py" "$@"

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Build lib/auth.css, the stylesheet for the three pages lib/authserver.py
+# serves (the /auth console, /login, the /i/<token> invite page).
+#
+# The pages use Tailwind utility classes, in their HTML and in the JS strings
+# that build DOM. This runs the Tailwind standalone CLI over lib/authserver.py
+# and writes the minified result, which is committed: the server only reads the
+# file, so nothing here is needed at runtime. The theme maps Tailwind's colours
+# and fonts onto the Porch design system (lib/porch.css), and the @font-face
+# rules carry the hashed font names porch_http serves, so a font change in
+# lib/vendor/fonts/ also makes lib/auth.css stale.
+#
+# Usage: bin/auth-css            regenerate lib/auth.css
+#        bin/auth-css --check    exit 1 if lib/auth.css is missing or differs
+#                                from a fresh build (bin/auth-deploy runs this)
+#
+# The CLI binary is pinned by version and sha256 and cached outside the repo;
+# it is downloaded on first use only, so --check needs no network after that.
+# Class names must appear whole in the source: 'bg-' + colour + '-500' is
+# invisible to the scan. Write the full name out, or add it to SAFELIST below.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SOURCE="$TUNNEL_DIR/lib/authserver.py"
+OUT="$TUNNEL_DIR/lib/auth.css"
+
+# Same version cdn.tailwindcss.com served when the pages were moved off it.
+TAILWIND_VERSION="3.4.17"
+TAILWIND_ASSET="tailwindcss-linux-x64"
+# From the release's sha256sums.txt.
+TAILWIND_SHA256="7d24f7fa191d2193b78cd5f5a42a6093e14409521908529f42d80b11fde1f1d4"
+TAILWIND_URL="https://github.com/tailwindlabs/tailwindcss/releases/download/v$TAILWIND_VERSION/$TAILWIND_ASSET"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/cush-tools"
+TAILWIND_BIN="$CACHE_DIR/tailwindcss-v$TAILWIND_VERSION-linux-x64"
+
+# Classes the content scan cannot see, as a JS array body: "'a', 'b'".
+SAFELIST=""
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
+die() { echo "!! $*" >&2; exit 1; }
+
+check=""
+case "${1:-}" in
+    "") ;;
+    --check) check=1 ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+esac
+
+sha_ok() { echo "$TAILWIND_SHA256  $1" | sha256sum --check --status; }
+
+ensure_binary() {
+    if [[ -f "$TAILWIND_BIN" ]]; then
+        sha_ok "$TAILWIND_BIN" \
+            || die "$TAILWIND_BIN does not match the pinned sha256; delete it and re-run"
+        return
+    fi
+    [[ "$(uname -s)-$(uname -m)" == "Linux-x86_64" ]] \
+        || die "only linux-x64 is pinned; add the asset and sha256 for $(uname -s)-$(uname -m)"
+    echo "==> downloading tailwindcss v$TAILWIND_VERSION" >&2
+    mkdir -p "$CACHE_DIR"
+    local part
+    part="$(mktemp "$CACHE_DIR/tailwindcss.XXXXXX")"
+    if ! curl -fsSL --max-time 300 -o "$part" "$TAILWIND_URL"; then
+        rm -f "$part"
+        die "download failed: $TAILWIND_URL"
+    fi
+    if ! sha_ok "$part"; then
+        rm -f "$part"
+        die "downloaded $TAILWIND_ASSET does not match the pinned sha256"
+    fi
+    chmod 755 "$part"
+    mv "$part" "$TAILWIND_BIN"
+}
+
+[[ -f "$SOURCE" ]] || die "$SOURCE not found"
+ensure_binary
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# The pages keep their Tailwind class names; the Porch look (lib/porch.css)
+# comes from the theme. The colour scales are remapped onto the Porch palette:
+# slate -> the warm night neutrals, blue/indigo -> porch light, emerald -> ok,
+# rose -> danger; base/panel/edge/accent are ground/surface/hairline/porch
+# light. Fonts are Geist, Geist Mono and Bricolage Grotesque (font-display);
+# their @font-face rules come from porch.css with the hashed file names the
+# auth server serves at /auth/__porch-assets/fonts/ (porch_http.serve_asset).
+# Everything else is Tailwind's defaults: preflight on, no plugins.
+cat > "$work/tailwind.config.js" <<EOF
+module.exports = {
+  content: [$(printf '%s' "$SOURCE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')],
+  safelist: [$SAFELIST],
+  darkMode: 'class',
+  theme: { extend: {
+    colors: {
+      base: '#121014', panel: '#1B181E', edge: '#2E2830', accent: '#F5A524',
+      slate: { 50:'#FBF8F4', 100:'#F3ECE4', 200:'#E9E1D8', 300:'#D3C9BE', 400:'#A79E95',
+               500:'#8F867D', 600:'#5E564F', 700:'#3A3339', 800:'#262129', 900:'#1B181E', 950:'#121014' },
+      blue: { 50:'#FFF6E5', 100:'#FFE9C2', 200:'#FFD58A', 300:'#FFC35C', 400:'#FAB43F',
+              500:'#F5A524', 600:'#D98C12', 700:'#B4670C', 800:'#8A4E0A', 900:'#5C3407', 950:'#3A2104' },
+      indigo: { 50:'#FFF6E5', 100:'#FFE9C2', 200:'#FFD58A', 300:'#FFC35C', 400:'#FAB43F',
+                500:'#F5A524', 600:'#D98C12', 700:'#B4670C', 800:'#8A4E0A', 900:'#5C3407', 950:'#3A2104' },
+      emerald: { 50:'#ECFAF2', 100:'#D2F3E0', 200:'#A9E6C3', 300:'#86DCAA', 400:'#5CCB8A',
+                 500:'#3DB571', 600:'#1F7A4A', 700:'#196340', 800:'#144E33', 900:'#0F3A26', 950:'#082417' },
+      rose: { 50:'#FEF0EF', 100:'#FCDCDA', 200:'#F9BAB6', 300:'#F7A39F', 400:'#F0605A',
+              500:'#E2463F', 600:'#C23A33', 700:'#9E2E28', 800:'#7A231F', 900:'#561915', 950:'#340E0C' },
+    },
+    fontFamily: {
+      sans: ['Geist', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+      mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+      display: ['"Bricolage Grotesque"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+    },
+  }},
+};
+EOF
+python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import porch_http; print(porch_http.font_face_rules("/auth/__porch-assets/fonts/"))' \
+    "$TUNNEL_DIR/lib" > "$work/in.css" || die "could not read the @font-face rules from lib/porch.css"
+grep -q '@font-face' "$work/in.css" || die "lib/porch.css has no @font-face rules"
+printf '@tailwind base;\n@tailwind components;\n@tailwind utilities;\n' >> "$work/in.css"
+
+# BROWSERSLIST pins autoprefixer's targets, so the output does not depend on a
+# browserslist config that happens to sit above the working directory.
+(cd "$work" && BROWSERSLIST="defaults" "$TAILWIND_BIN" \
+    -c "$work/tailwind.config.js" -i "$work/in.css" -o "$work/auth.css" --minify) \
+    > "$work/build.log" 2>&1 || { cat "$work/build.log" >&2; die "tailwindcss failed"; }
+[[ -s "$work/auth.css" ]] || die "tailwindcss wrote no output"
+
+if [[ -n "$check" ]]; then
+    [[ -f "$OUT" ]] || die "lib/auth.css is missing; run bin/auth-css and commit it"
+    cmp -s "$work/auth.css" "$OUT" \
+        || die "lib/auth.css is stale against lib/authserver.py; run bin/auth-css and commit it"
+    echo "lib/auth.css is up to date ($(wc -c < "$OUT") bytes)"
+    exit 0
+fi
+
+# Rename into place: the running server has already read its copy, but nothing
+# else should ever see half a file.
+cp "$work/auth.css" "$OUT.tmp"
+chmod 644 "$OUT.tmp"
+mv "$OUT.tmp" "$OUT"
+echo "wrote lib/auth.css ($(wc -c < "$OUT") bytes, tailwindcss v$TAILWIND_VERSION)"

@@ -1,0 +1,111 @@
+#!/bin/bash
+# Start a music-collect / player server and expose it via tunnel.
+# Usage: bin/music [name]
+# Example: bin/music             -> random subdomain like music-a1b2c3.tunnel.cush.rocks
+#          bin/music mixtape     -> mixtape.tunnel.cush.rocks
+#
+# The page is a play-only player for anyone with the link. Uploading,
+# deleting, and reordering are unlocked automatically for the owner — any
+# browser enrolled with cush-auth (it carries the .cush.rocks cush_auth
+# cookie). No key to manage.
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+# Strip --bg from args early
+BG_MODE=""
+ORIG_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--bg" ]; then BG_MODE=1
+    else ORIG_ARGS+=("$arg"); fi
+done
+set -- "${ORIG_ARGS[@]}"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: music [name]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "Start a music player/collect server and expose it via tunnel."
+  echo "Anyone with the link can play & download the tracks (a modern player"
+  echo "with a real waveform). The owner — any cush-auth-enrolled browser —"
+  echo "automatically gets add/delete/reorder controls; everyone else is play-only."
+  echo ""
+  echo "Examples:"
+  echo "  music               -> random subdomain (e.g. music-a1b2c3.${PORCH_TUNNEL_BASE})"
+  echo "  music mixtape       -> mixtape.${PORCH_TUNNEL_BASE}"
+  echo ""
+  echo "Tracks are saved to ~/music/<name>/"
+  exit 0
+fi
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  NAME="music-$(head -c3 /dev/urandom | xxd -p)"
+fi
+# $NAME also names the directory under ~/music — validate before mkdir.
+tunnel_require_valid_name "$NAME"
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" "$NAME" || exit 2
+
+# Handle --bg mode (after name resolution)
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" && {
+        echo "Music: https://${NAME}.${PORCH_TUNNEL_BASE}"
+        echo "Tracks will be saved to: $HOME/music/$NAME/"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+MUSIC_DIR="$HOME/music/$NAME"
+mkdir -p "$MUSIC_DIR"
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  door_owned_release "$NAME" >/dev/null     # records "closed" if nobody said why
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Start music server in the background. --devices points at the cush-auth
+# registry so the owner's enrolled browser is recognized automatically.
+python3 "$TUNNEL_DIR/lib/musicserver.py" \
+    --port "$PORT" \
+    --bind 127.0.0.1 \
+    --dir "$MUSIC_DIR" \
+    --devices "$TUNNEL_DIR/data/devices.json" \
+    --title "$NAME" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+door_recipe_write "$NAME" music
+tunnel_state_register "$NAME" "music" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "Music: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo "Tracks will be saved to: $MUSIC_DIR"
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

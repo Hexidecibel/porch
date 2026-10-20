@@ -1,0 +1,161 @@
+#!/bin/bash
+# Bidirectional text exchange via tunnel
+# Usage: bin/exchange <name>           -> receive mode
+#        echo "text" | bin/exchange <name>  -> send mode
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: bin/exchange <name>"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo "       echo \"text\" | bin/exchange <name>"
+  echo ""
+  echo "Bidirectional text exchange via tunnel."
+  echo ""
+  echo "  Without stdin: receive mode (user pastes text at the URL)"
+  echo "  With stdin:    send mode (user copies text from the URL)"
+  echo ""
+  echo "  <name>  Subdomain name (-> <name>.${PORCH_TUNNEL_BASE})"
+  echo ""
+  echo "Received text is saved under a per-user 0700 directory:"
+  echo "  \$XDG_RUNTIME_DIR/porch/exchange/<name>  (or /tmp/porch-\$UID/exchange/<name>)"
+  echo "The exact path is printed on launch."
+  exit 0
+fi
+
+BG_MODE=""
+ORIG_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--bg" ]; then BG_MODE=1
+    else ORIG_ARGS+=("$arg"); fi
+done
+set -- "${ORIG_ARGS[@]}"
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  echo "Usage: bin/exchange <name>" >&2
+  echo "       echo \"text\" | bin/exchange <name>" >&2
+  exit 1
+fi
+# $NAME becomes a file name under the runtime dir as well as the subdomain —
+# validate before anything is created.
+tunnel_require_valid_name "$NAME"
+
+# Per-user 0700 runtime dir (was the shared /tmp/exchange, where another
+# account could pre-create the dir or plant a symlink at the output path).
+# lib/rundir.py verifies owner + mode and refuses anything else.
+EXCHANGE_DIR="$(python3 "$TUNNEL_DIR/lib/rundir.py" exchange)" || exit 1
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" || exit 2
+
+# --bg daemonize: detect mode and capture stdin before re-exec (daemon gets /dev/null)
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    # Detect mode and capture stdin before daemonizing
+    if [ ! -t 0 ]; then
+        # Send mode - capture stdin
+        CONTENT_FILE=$(mktemp "$EXCHANGE_DIR/.send-${NAME}-XXXXX")
+        cat > "$CONTENT_FILE"
+        if [ ! -s "$CONTENT_FILE" ]; then
+            echo "Error: No content provided" >&2
+            rm -f "$CONTENT_FILE"
+            exit 1
+        fi
+        export _CUSH_EXCHANGE_FILE="$CONTENT_FILE"
+    fi
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" && {
+        if [ -n "${_CUSH_EXCHANGE_FILE:-}" ]; then
+            echo "Exchange (send): https://${NAME}.${PORCH_TUNNEL_BASE}"
+        else
+            echo "Exchange (receive): https://${NAME}.${PORCH_TUNNEL_BASE}"
+            echo "Text will be saved to: $EXCHANGE_DIR/$NAME"
+        fi
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+# Check for pre-captured content (from --bg daemonize)
+if [ -n "${_CUSH_EXCHANGE_FILE:-}" ]; then
+  MODE="send"
+  CONTENT_FILE="$_CUSH_EXCHANGE_FILE"
+# Auto-detect mode: terminal stdin = receive, piped stdin = send
+# Note: [ -p /dev/stdin ] distinguishes actual pipes from /dev/null (background/non-interactive)
+elif [ -t 0 ]; then
+  MODE="receive"
+elif [ -p /dev/stdin ]; then
+  MODE="send"
+else
+  MODE="receive"
+fi
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+CONTENT_FILE="${CONTENT_FILE:-}"
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+  # Send mode: remove temp content file
+  if [ "$MODE" = "send" ] && [ -n "$CONTENT_FILE" ]; then
+    rm -f "$CONTENT_FILE"
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+if [ "$MODE" = "send" ]; then
+  # Read stdin to temp file (skip if pre-captured from --bg)
+  if [ -z "$CONTENT_FILE" ]; then
+    CONTENT_FILE=$(mktemp "$EXCHANGE_DIR/.send-${NAME}-XXXXX")
+    cat > "$CONTENT_FILE"
+    if [ ! -s "$CONTENT_FILE" ]; then
+      echo "Error: no input" >&2
+      rm -f "$CONTENT_FILE"
+      exit 1
+    fi
+  fi
+
+  # Start exchange server in send mode
+  python3 "$TUNNEL_DIR/lib/exchangeserver.py" --port "$PORT" --mode send --file "$CONTENT_FILE" --name "$NAME" &
+  HTTP_PID=$!
+else
+  OUTPUT_FILE="$EXCHANGE_DIR/$NAME"
+
+  # Start exchange server in receive mode
+  python3 "$TUNNEL_DIR/lib/exchangeserver.py" --port "$PORT" --mode receive --name "$NAME" --output "$OUTPUT_FILE" &
+  HTTP_PID=$!
+fi
+
+wait_for_port "$PORT" || exit 1
+
+tunnel_state_register "$NAME" "exchange" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+if [ "$MODE" = "send" ]; then
+  echo "Exchange (send): https://${NAME}.${PORCH_TUNNEL_BASE}"
+else
+  echo "Exchange (receive): https://${NAME}.${PORCH_TUNNEL_BASE}"
+  echo "Text will be saved to: $OUTPUT_FILE"
+fi
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

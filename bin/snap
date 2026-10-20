@@ -1,0 +1,357 @@
+#!/bin/bash
+# Screenshot a URL and share via tunnel
+# Usage: bin/snap <url> <name>
+#        bin/snap --local <url> [output-path]
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# Portable `timeout` — GNU coreutils on Linux, `gtimeout` on macOS (Homebrew
+# coreutils), otherwise a pure-bash fallback via Python. Exit 124 signals
+# timeout, matching GNU `timeout`.
+run_with_timeout() {
+    local secs="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${secs}s" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "${secs}s" "$@"
+    else
+        # Python-based fallback. Propagates exit code; returns 124 on timeout.
+        python3 - "$secs" "$@" <<'PY'
+import os, signal, subprocess, sys
+timeout = int(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    p = subprocess.Popen(cmd)
+    try:
+        p.wait(timeout=timeout)
+        sys.exit(p.returncode)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+        sys.exit(124)
+except FileNotFoundError:
+    sys.exit(127)
+PY
+    fi
+}
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: snap <url> <name>"
+  echo "       snap --local <url> [output-path]"
+  echo ""
+  echo "Capture a screenshot of a URL and share it via tunnel."
+  echo ""
+  echo "Options:"
+  echo "  --width N       Viewport width (default: 1280)"
+  echo "  --height N      Viewport height (default: 800)"
+  echo "  --full-page     Attempt full-page screenshot (Chrome support varies)"
+  echo "  --timeout N     Chrome timeout in seconds (default: 30)"
+  echo "  --local         Save locally only, no tunnel (legacy mode)"
+  echo "  --allow-private Allow loopback/private/link-local targets (refused by"
+  echo "                  default: the screenshot is published on a public URL)"
+  echo "  --no-sandbox    Run Chrome without its sandbox. Only needed where the"
+  echo "                  sandbox cannot start (e.g. unprivileged user namespaces"
+  echo "                  blocked by AppArmor); always on when running as root,"
+  echo "                  where Chrome refuses to start sandboxed."
+  echo ""
+  echo "Only http:// and https:// URLs are accepted. All of Chrome's traffic"
+  echo "(the page, redirects, iframes, images, scripts) goes through a local"
+  echo "filtering proxy (lib/snapproxy.py) that resolves every host itself and"
+  echo "refuses private/loopback/link-local/CGNAT targets unless --allow-private."
+  echo ""
+  echo "Examples:"
+  echo "  snap https://example.com myshot       -> https://myshot.${PORCH_TUNNEL_BASE}"
+  echo "  snap --full-page https://example.com page"
+  echo "  snap --width 1920 --height 1080 https://example.com wide"
+  echo "  snap --local https://example.com      -> /tmp/snap-<timestamp>.png"
+  echo "  snap --local https://example.com /tmp/shot.png"
+  exit 0
+fi
+
+# Defaults
+WIDTH=1280
+HEIGHT=800
+FULL_PAGE=""
+TIMEOUT=30
+LOCAL_MODE=""
+ALLOW_PRIVATE=""
+NO_SANDBOX=""
+
+# Parse flags
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --width)
+      WIDTH="$2"
+      shift 2
+      ;;
+    --height)
+      HEIGHT="$2"
+      shift 2
+      ;;
+    --full-page)
+      FULL_PAGE=1
+      shift
+      ;;
+    --timeout)
+      TIMEOUT="$2"
+      shift 2
+      ;;
+    --local)
+      LOCAL_MODE=1
+      shift
+      ;;
+    --allow-private)
+      ALLOW_PRIVATE=1
+      shift
+      ;;
+    --no-sandbox)
+      NO_SANDBOX=1
+      shift
+      ;;
+    -*)
+      echo "Error: unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+case "$WIDTH$HEIGHT$TIMEOUT" in
+  *[!0-9]*|"") echo "Error: --width, --height and --timeout must be numbers" >&2; exit 1 ;;
+esac
+
+# Chrome refuses to run sandboxed as root; elsewhere keep the sandbox unless
+# explicitly told otherwise.
+[ "$(id -u)" = "0" ] && NO_SANDBOX=1
+
+# Validate the URL up front (scheme allowlist + public-address check) for a
+# clear error message. The real enforcement is the proxy below: it re-checks
+# every connection Chrome makes, including redirects and sub-resources.
+check_snap_url() {
+  local args=(--check-url "$1")
+  [ -n "$ALLOW_PRIVATE" ] && args+=(--allow-private)
+  python3 "$TUNNEL_DIR/lib/snapserver.py" "${args[@]}" >/dev/null || return 1
+}
+
+# Start lib/snapproxy.py on 127.0.0.1 (ephemeral port); sets PROXY_PID and
+# PROXY_PORT. Chrome is pointed at it with --proxy-server.
+PROXY_PID=""
+PROXY_PORT=""
+start_snap_proxy() {
+  local dir portfile i
+  dir="$(python3 "$TUNNEL_DIR/lib/rundir.py" snap)" || return 1
+  portfile="$(mktemp "$dir/proxy-XXXXX")" || return 1
+  rm -f "$portfile"
+  local args=(--port-file "$portfile")
+  [ -n "$ALLOW_PRIVATE" ] && args+=(--allow-private)
+  python3 "$TUNNEL_DIR/lib/snapproxy.py" "${args[@]}" &
+  PROXY_PID=$!
+  for i in $(seq 1 50); do
+    [ -s "$portfile" ] && break
+    sleep 0.1
+  done
+  PROXY_PORT="$(cat "$portfile" 2>/dev/null)"
+  rm -f "$portfile"
+  case "$PROXY_PORT" in
+    ""|*[!0-9]*) echo "Error: snap proxy did not start" >&2; stop_snap_proxy; return 1 ;;
+  esac
+}
+stop_snap_proxy() {
+  if [ -n "$PROXY_PID" ]; then
+    kill "$PROXY_PID" 2>/dev/null
+    wait "$PROXY_PID" 2>/dev/null
+    PROXY_PID=""
+  fi
+}
+
+build_chrome_args() {
+  # $1 = screenshot output path
+  CHROME_ARGS=(
+    --headless=new
+    --disable-gpu
+    --disable-software-rasterizer
+    "--screenshot=$1"
+    "--window-size=${WIDTH},${HEIGHT}"
+  )
+  [ -n "$NO_SANDBOX" ] && CHROME_ARGS+=(--no-sandbox)
+  [ -n "$FULL_PAGE" ] && CHROME_ARGS+=(--full-page-screenshot)
+  # Everything through the filtering proxy. <-loopback> removes Chrome's
+  # implicit "never proxy localhost" rule, so 127.0.0.1 hits the filter too.
+  # WebRTC may not send UDP around the proxy.
+  CHROME_ARGS+=(
+    "--proxy-server=http://127.0.0.1:${PROXY_PORT}"
+    "--proxy-bypass-list=<-loopback>"
+    --force-webrtc-ip-handling-policy=disable_non_proxied_udp
+    --disable-quic
+  )
+}
+
+chrome_failed_hint() {
+  if [ -z "$NO_SANDBOX" ]; then
+    echo "If Chrome cannot start its sandbox on this machine (common where unprivileged" >&2
+    echo "user namespaces are restricted), re-run with --no-sandbox." >&2
+  fi
+}
+
+# Find Chrome / Chromium. Check PATH first for Linux-style names, then fall
+# back to common macOS app-bundle locations.
+CHROME=""
+for candidate in google-chrome google-chrome-stable chromium-browser chromium; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    CHROME="$candidate"
+    break
+  fi
+done
+
+if [ -z "$CHROME" ]; then
+  for candidate in \
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" \
+      "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+    if [ -x "$candidate" ]; then
+      CHROME="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$CHROME" ]; then
+  echo "Error: no Chrome/Chromium found in PATH or standard macOS app locations" >&2
+  exit 1
+fi
+
+# --- LOCAL MODE ---
+if [ -n "$LOCAL_MODE" ]; then
+  URL="$1"
+  if [ -z "$URL" ]; then
+    echo "Usage: snap --local <url> [output-path]" >&2
+    exit 1
+  fi
+  OUTPUT="${2:-/tmp/snap-$(date +%s).png}"
+
+  check_snap_url "$URL" || exit 1
+  start_snap_proxy || exit 1
+  trap stop_snap_proxy EXIT INT TERM
+  build_chrome_args "$OUTPUT"
+
+  echo "Capturing: $URL"
+  echo "Viewport:  ${WIDTH}x${HEIGHT}"
+  [ -n "$FULL_PAGE" ] && echo "Mode:      full-page"
+  echo "Timeout:   ${TIMEOUT}s"
+  echo ""
+
+  # `--` ends Chrome's switch parsing, so a URL can never be read as a flag.
+  run_with_timeout "$TIMEOUT" "$CHROME" "${CHROME_ARGS[@]}" -- "$URL" 2>/dev/null
+  STATUS=$?
+  stop_snap_proxy
+  if [ $STATUS -eq 124 ]; then
+    echo "Error: timed out after ${TIMEOUT}s" >&2
+    exit 1
+  elif [ $STATUS -ne 0 ]; then
+    echo "Error: Chrome exited with status $STATUS" >&2
+    chrome_failed_hint
+    exit 1
+  fi
+
+  if [ ! -f "$OUTPUT" ]; then
+    echo "Error: screenshot file was not created" >&2
+    exit 1
+  fi
+
+  SIZE=$(du -h "$OUTPUT" | cut -f1)
+  echo "Screenshot saved: $OUTPUT ($SIZE)"
+  exit 0
+fi
+
+# --- TUNNEL MODE ---
+URL="$1"
+NAME="$2"
+
+if [ -z "$URL" ] || [ -z "$NAME" ]; then
+  echo "Usage: snap <url> <name>" >&2
+  echo "       snap --local <url> [output-path]" >&2
+  exit 1
+fi
+tunnel_require_valid_name "$NAME"
+check_snap_url "$URL" || exit 1
+
+# Take screenshot to a temp file in the per-user runtime dir. BSD mktemp on
+# macOS rejects templates with suffix after trailing X's — create without
+# suffix then rename.
+SNAP_DIR="$(python3 "$TUNNEL_DIR/lib/rundir.py" snap)" || exit 1
+SNAP_BASE=$(mktemp "$SNAP_DIR/snap-${NAME}-XXXXX")
+SNAP_FILE="${SNAP_BASE}.png"
+mv "$SNAP_BASE" "$SNAP_FILE"
+
+start_snap_proxy || { rm -f "$SNAP_FILE"; exit 1; }
+trap 'stop_snap_proxy; rm -f "$SNAP_FILE"' EXIT INT TERM
+build_chrome_args "$SNAP_FILE"
+
+echo "Capturing: $URL"
+echo "Viewport:  ${WIDTH}x${HEIGHT}"
+[ -n "$FULL_PAGE" ] && echo "Mode:      full-page"
+echo "Timeout:   ${TIMEOUT}s"
+echo ""
+
+# Use the portable wrapper defined above — bare `timeout` is GNU-only, and on
+# a box without it this branch failed with 127 ("Chrome exited with status 127").
+run_with_timeout "$TIMEOUT" "$CHROME" "${CHROME_ARGS[@]}" -- "$URL" 2>/dev/null
+STATUS=$?
+stop_snap_proxy
+trap - EXIT INT TERM
+if [ $STATUS -eq 124 ]; then
+  echo "Error: timed out after ${TIMEOUT}s" >&2
+  rm -f "$SNAP_FILE"
+  exit 1
+elif [ $STATUS -ne 0 ]; then
+  echo "Error: Chrome exited with status $STATUS" >&2
+  chrome_failed_hint
+  rm -f "$SNAP_FILE"
+  exit 1
+fi
+
+if [ ! -f "$SNAP_FILE" ]; then
+  echo "Error: screenshot file was not created" >&2
+  exit 1
+fi
+
+SIZE=$(du -h "$SNAP_FILE" | cut -f1)
+echo "Screenshot captured ($SIZE)"
+echo ""
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+  rm -f "$SNAP_FILE"
+}
+
+trap cleanup EXIT INT TERM
+
+# Start snap server in the background
+python3 "$TUNNEL_DIR/lib/snapserver.py" --port "$PORT" --file "$SNAP_FILE" --name "$NAME" --url "$URL" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+tunnel_state_register "$NAME" "snap" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "Screenshot: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo ""
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

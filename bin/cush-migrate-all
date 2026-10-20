@@ -1,0 +1,102 @@
+#!/bin/bash
+# Bulk-migrate every `.cush-secrets` manifest under one or more roots from
+# op:// to inf://. Thin wrapper around `bin/cush-migrate-backend`: walks a
+# tree, classifies each manifest, runs a dry-run preflight pass across the
+# whole batch, prompts the user, and then runs the real migration in
+# sequence. Default root is `~/local/src`.
+#
+# Already-migrated manifests (only inf:// refs) are skipped — re-running
+# this tool after an interruption is always safe.
+#
+# Requires both backends to be authenticated:
+#   - 1Password: ~/.config/cush-tools/op.env  (or `eval $(op signin)`)
+#   - Infisical: ~/.config/cush-tools/infisical.env (universal-auth)
+#
+# Per-scheme auth is checked inside the per-project tool — a failure on
+# either side prints a backend-specific hint and exits non-zero from the
+# first project, halting the bulk run unless --continue-on-error is set.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source both backend shims so OP_* and INFISICAL_* env vars are loaded
+# into this shell (and inherited by python + the per-project tool we
+# invoke). Each shim is conditional on its env file existing; sourcing
+# them also runs cheap setup (no auth probe).
+# shellcheck source=../lib/op.sh
+[ -f "$HOME/.config/cush-tools/op.env" ] && . "$TUNNEL_DIR/lib/op.sh"
+# shellcheck source=../lib/infisical.sh
+[ -f "$HOME/.config/cush-tools/infisical.env" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+
+show_help() {
+    cat <<'EOF'
+Usage: bin/cush-migrate-all [ROOT_DIR]... [options]
+
+Bulk-migrate every .cush-secrets manifest under one or more roots from
+op:// to inf://. Defaults to ~/local/src.
+
+Two-phase by default:
+  1. Dry-run pass over every project (no writes anywhere).
+  2. Confirmation prompt (TTY only).
+  3. Real-run pass.
+
+Already-migrated manifests (only inf://) are skipped. Empty manifests are
+skipped. Invalid manifests are reported and skipped.
+
+  bin/cush-migrate-all                              # ~/local/src
+  bin/cush-migrate-all ~/code ~/work                # multiple roots
+  bin/cush-migrate-all --dry-run                    # plan + dry-run only
+  bin/cush-migrate-all --skip-dry-run               # straight to real run
+  bin/cush-migrate-all --continue-on-error          # don't halt on first fail
+  bin/cush-migrate-all --include '*myapp*'          # filter to matching paths
+  bin/cush-migrate-all --exclude '*scratch*'        # skip matching paths
+
+Options:
+  --dry-run                       Preview only; never touch backends or disk.
+  --skip-dry-run                  Skip the dry-run preflight pass.
+  --continue-on-error             Don't stop at first failure (per-iteration
+                                  in each phase); summarize at the end.
+  --include GLOB                  Only migrate paths matching GLOB (repeatable).
+  --exclude GLOB                  Skip paths matching GLOB (repeatable).
+  --target-env ENV                Target Infisical env slug (default: dev).
+  --target-path-template TMPL     inf:// path template (default: '/{project}').
+  --keep-bak                      Pass-through: keep .cush-secrets.bak after
+                                  per-project success.
+  --no-keep-bak                   Pass-through: delete .cush-secrets.bak after
+                                  verified success.
+  --no-validate                   Pass-through: skip post-migration
+                                  `bin/inject --check`.
+  --keep-orphans                  Pass-through: skip the per-project
+                                  pre-flight orphan cleanup.
+  --clean-only                    Bulk cleanup mode: walk every matching
+                                  manifest, run `cush-migrate-backend
+                                  --clean-only` on each, and summarize.
+                                  Does NOT migrate.
+  --json                          Emit a final JSON summary on stdout.
+  --self-test                     Run an in-process smoke test with a fake
+                                  subprocess runner (no real backend calls).
+  -h, --help                      Show this help.
+
+Resume safety: if interrupted mid-bulk, already-migrated projects are
+inf-only — re-running skips them. The mid-flight project's
+.cush-secrets.bak (if any) is left intact for manual rollback.
+
+Exit codes:
+  0  all succeeded (or only no-op skips)
+  1  at least one project failed migration
+  2  argument or discovery error
+EOF
+}
+
+# Parse --help / -h before dispatching, so we can print without an auth check.
+for a in "$@"; do
+    case "$a" in
+        -h|--help) show_help; exit 0 ;;
+    esac
+done
+
+# Forward all args to lib/migrate_all.py. The python layer handles flag
+# parsing, manifest discovery, plan rendering, the dry/real-run phases,
+# and the final summary. --self-test is also handled inside python.
+exec python3 "$TUNNEL_DIR/lib/migrate_all.py" "$@"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Porch link shortener (${brand})
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 ${repo_dir}/lib/shortenerserver.py --port ${shortener_port} --data ${data_dir}/links.json
+ExecReload=/bin/kill -HUP $$MAINPID
+Restart=always
+RestartSec=5
+WorkingDirectory=${repo_dir}
+
+[Install]
+WantedBy=default.target

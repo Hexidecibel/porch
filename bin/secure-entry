@@ -1,0 +1,405 @@
+#!/bin/bash
+# Accept secrets via a web form without exposing them in chat
+# Usage: bin/secure-entry [label] [--bg]
+#        bin/secure-entry [label] --save-to-secrets op://Vault/Item/field [--keep-disk] [--signal-file <path>]
+#        bin/secure-entry [label] --save-to-secrets inf://env/path/KEY
+#        bin/secure-entry [label] --field <name>[:<type>] [--field ...] --save-to-secrets op://Vault/Item
+# Example: bin/secure-entry           -> entry-secret.tunnel.cush.rocks/<token>/
+#          bin/secure-entry apikey     -> entry-apikey.tunnel.cush.rocks/<token>/
+#          bin/secure-entry mykey --save-to-secrets op://Personal/myapp/key
+#          bin/secure-entry creds --field user --field pass --field cert.pem:file
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# ── Flag parsing ────────────────────────────────────────────────────────────
+# Strip --bg early (handled separately for daemonize re-exec).
+# Collect --save-to-secrets / --save-to-op (deprecated alias), --keep-disk,
+# --signal-file, --type, --field as named flags; everything else lands in
+# REST as the positional [label].
+BG_MODE=""
+SAVE_TO_SECRETS=""
+SAW_LEGACY_SAVE_TO_OP=""
+KEEP_DISK=""
+SIGNAL_FILE=""
+SHRED_AFTER=""
+ENTRY_TYPE="string"
+FIELDS=()
+REST=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bg)
+            BG_MODE=1; shift
+            ;;
+        --save-to-secrets)
+            SAVE_TO_SECRETS="$2"; shift 2
+            ;;
+        --save-to-secrets=*)
+            SAVE_TO_SECRETS="${1#--save-to-secrets=}"; shift
+            ;;
+        --save-to-op)
+            # Deprecated alias — accepts op:// historically; now passes
+            # through verbatim (so an inf:// here would also work, though
+            # that's nonsensical given the flag name).
+            SAVE_TO_SECRETS="$2"; SAW_LEGACY_SAVE_TO_OP=1; shift 2
+            ;;
+        --save-to-op=*)
+            SAVE_TO_SECRETS="${1#--save-to-op=}"; SAW_LEGACY_SAVE_TO_OP=1; shift
+            ;;
+        --keep-disk)
+            KEEP_DISK=1; shift
+            ;;
+        --shred-after)
+            SHRED_AFTER="$2"; shift 2
+            ;;
+        --shred-after=*)
+            SHRED_AFTER="${1#--shred-after=}"; shift
+            ;;
+        --signal-file)
+            SIGNAL_FILE="$2"; shift 2
+            ;;
+        --signal-file=*)
+            SIGNAL_FILE="${1#--signal-file=}"; shift
+            ;;
+        --type)
+            ENTRY_TYPE="$2"; shift 2
+            ;;
+        --type=*)
+            ENTRY_TYPE="${1#--type=}"; shift
+            ;;
+        --field)
+            FIELDS+=("$2"); shift 2
+            ;;
+        --field=*)
+            FIELDS+=("${1#--field=}"); shift
+            ;;
+        -h|--help)
+            sed "s/\${PORCH_TUNNEL_BASE}/$PORCH_TUNNEL_BASE/g" <<'EOF'
+Usage: secure-entry [label] [options]
+
+Start a secure entry form and expose it via tunnel. Anyone with the link can
+submit one or more secrets to your machine. The link carries a random path
+token (https://entry-<label>.${PORCH_TUNNEL_BASE}/<token>/); any other path on
+that host is a 404, so the guessable subdomain alone is not enough to submit.
+
+Single-field mode (default): one input on the form, value written to one disk
+file (and/or one op://V/I/F).
+
+Multi-field mode (--field): multiple inputs on a single form, one Submit
+button. Disk path becomes a directory, op ref becomes op://Vault/Item (no
+trailing field — each form field is written as a same-named op item field).
+
+Options:
+  --bg                          Daemonize (survives parent shell exit)
+  --save-to-secrets <ref>       Backend ref (op:// or inf://).
+                                Single-field: op://Vault/Item/field
+                                              or inf://<env>/<path>/<KEY>.
+                                Multi-field (with --field): op://Vault/Item
+                                              or inf://<env>/<path...>.
+                                Suppresses disk write by default.
+  --save-to-op <ref>            Deprecated alias for --save-to-secrets.
+  --keep-disk                   With --save-to-secrets, also write to disk.
+  --shred-after <duration>      Shred the on-disk secret after this long.
+                                Accepts 90s, 30m, 2h, or bare seconds. Survives
+                                the tunnel exiting. Use for credentials you only
+                                need once -- stops the runtime dir accumulating
+                                live keys.
+  --signal-file <path>          Touch this file after a successful persist
+                                (used by bin/inject to coordinate).
+  --type {string|file|ssh}      Single-field submission type. Default: string.
+                                Use --field name:type for multi-field overrides.
+  --field <name>[:<type>]       Multi-field mode. Repeat for multiple fields.
+                                Type ∈ {string, file, ssh}, default string.
+
+Examples:
+  secure-entry                          -> entry-secret.${PORCH_TUNNEL_BASE}/<token>/
+  secure-entry apikey                   -> entry-apikey.${PORCH_TUNNEL_BASE}/<token>/
+  secure-entry mykey --save-to-secrets op://Personal/myapp/key --bg
+  secure-entry mykey --save-to-secrets inf://dev/myapp/API_KEY --bg
+  secure-entry creds --field user --field pass --bg
+  secure-entry boxsetup --field token --field key.pem:file --field id:ssh \
+               --save-to-secrets op://Personal/box --bg
+
+Disk layout (<dir> is $XDG_RUNTIME_DIR/porch/secure-entry, or
+/tmp/porch-$UID/secure-entry when XDG_RUNTIME_DIR is unset; the exact path is
+printed on launch):
+  Single-field:  <dir>/<label>           (flat file, mode 600)
+  Multi-field:   <dir>/<label>/<field>   (dir 700, files 600)
+
+With --save-to-secrets, the secret lands in 1Password / Infisical and never
+touches disk (unless --keep-disk is also passed).
+EOF
+            exit 0
+            ;;
+        *)
+            REST+=("$1"); shift
+            ;;
+    esac
+done
+set -- "${REST[@]}"
+
+# Determine if we're in multi-field mode based on --field count.
+MULTI_MODE=""
+if [ "${#FIELDS[@]}" -gt 0 ]; then
+    MULTI_MODE=1
+fi
+
+# ── Deprecation nudge for --save-to-op ──────────────────────────────────────
+# Print a one-time stderr note when the legacy flag is used. Doesn't fail —
+# the alias still works for back-compat with cush-tools call sites that
+# haven't been updated yet (and external scripts).
+if [ -n "$SAW_LEGACY_SAVE_TO_OP" ]; then
+    echo "secure-entry: note: --save-to-op is deprecated; use --save-to-secrets (accepts op:// or inf://) instead." >&2
+fi
+
+# ── Label derivation ────────────────────────────────────────────────────────
+# When --save-to-secrets is set without an explicit label, derive a slugified
+# label from the ref body (vault-item-field for op://, env-path-key for
+# inf://) so daemon names stay descriptive. Keeps multiple concurrent writes
+# from clobbering each other's tunnels.
+slugify_secrets_ref() {
+    # Input: op://X/Y/Z or inf://X/Y/Z  ->  x-y-z (lowercase, [a-z0-9-]+).
+    local ref="$1"
+    # Strip the scheme regardless of which one was used.
+    local stripped="${ref#op://}"
+    stripped="${stripped#inf://}"
+    printf '%s' "$stripped" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-+//; s/-+$//'
+}
+
+if [ -z "${1:-}" ] && [ -n "$SAVE_TO_SECRETS" ]; then
+    LABEL="$(slugify_secrets_ref "$SAVE_TO_SECRETS")"
+    if [ -z "$LABEL" ]; then
+        echo "error: could not derive label from --save-to-secrets $SAVE_TO_SECRETS" >&2
+        exit 2
+    fi
+else
+    LABEL="${1:-secret}"
+fi
+# The label is a subdomain component AND the on-disk path
+# /tmp/secure-entry/<label> that tunnel_state_watchdog later removes with
+# `rm -rf`. Validate before either is built.
+tunnel_require_valid_name "$LABEL" "label"
+NAME="entry-$LABEL"
+tunnel_require_valid_name "$NAME"
+
+# ── Ref-vs-field shape validation ──────────────────────────────────────────
+# Defer to lib/cush_secrets.py's validate_persist_ref_shape so the rules
+# stay in one place across both bash and the python child. We do the check
+# here in bash too so the error surfaces BEFORE we daemonize / spawn the
+# tunnel. (The python entrypoint re-validates as a belt-and-braces guard.)
+if [ -n "$SAVE_TO_SECRETS" ]; then
+    case "$SAVE_TO_SECRETS" in
+        op://*|inf://*) ;;
+        *)
+            echo "error: --save-to-secrets must start with op:// or inf:// (got $SAVE_TO_SECRETS)" >&2
+            exit 2
+            ;;
+    esac
+    MULTI_FLAG="False"
+    [ -n "$MULTI_MODE" ] && MULTI_FLAG="True"
+    # The ref reaches python as argv, never spliced into the program text —
+    # a ref containing a quote would otherwise close the string literal and
+    # run whatever follows it.
+    if ! python3 -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+import cush_secrets
+try:
+    cush_secrets.validate_persist_ref_shape(sys.argv[2], multi_field=(sys.argv[3] == 'True'))
+except Exception as e:
+    sys.stderr.write(f'error: {e}\n')
+    sys.exit(2)
+" "$TUNNEL_DIR/lib" "$SAVE_TO_SECRETS" "$MULTI_FLAG" ; then
+        exit 2
+    fi
+fi
+
+# ── URL path token ─────────────────────────────────────────────────────────
+# The form is only served under /<token>/. Passed to the python server via the
+# environment (never argv: ps and the launch history would show it). The
+# daemonized re-exec inherits the parent's token so the URL printed below is
+# the one that works.
+if [ "${_CUSH_DAEMONIZED:-}" != "1" ] || [ -z "${SECURE_ENTRY_TOKEN:-}" ]; then
+    SECURE_ENTRY_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+fi
+export SECURE_ENTRY_TOKEN
+ENTRY_URL="https://${NAME}.${PORCH_TUNNEL_BASE}/${SECURE_ENTRY_TOKEN}/"
+
+# ── Output path setup ──────────────────────────────────────────────────────
+# Single-field: <dir>/<label> is a flat file.
+# Multi-field:  <dir>/<label>/ is a directory; one file per field.
+# <dir> is a per-user 0700 runtime directory (lib/rundir.py verifies owner
+# and mode and refuses anything else). It used to be the shared
+# /tmp/secure-entry. Only created when we actually intend to write to disk.
+OUTPUT_PATH=""
+if [ -z "$SAVE_TO_SECRETS" ] || [ -n "$KEEP_DISK" ]; then
+    OUTPUT_DIR="$(python3 "$TUNNEL_DIR/lib/rundir.py" secure-entry)" || exit 1
+    OUTPUT_PATH="$OUTPUT_DIR/$LABEL"
+fi
+
+# ── Backend env loading ─────────────────────────────────────────────────────
+# Source both shims so OP_*/INFISICAL_* env vars are inherited across the
+# daemonize fork. We don't run a bash-level auth probe — the python child
+# performs auth lazily on first write, and the user can clearly see if the
+# write succeeded (or get a clear error in the form's response).
+if [ -n "$SAVE_TO_SECRETS" ]; then
+    # shellcheck source=../lib/op.sh
+    [ -f "$HOME/.config/cush-tools/op.env" ] && . "$TUNNEL_DIR/lib/op.sh"
+    # shellcheck source=../lib/infisical.sh
+    [ -f "$HOME/.config/cush-tools/infisical.env" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+fi
+
+# ── Backend CLI check ──────────────────────────────────────────────────────
+# Fail now, before a tunnel is up, rather than after someone has typed the
+# secret into a form that can only answer "could not save".
+if [ -n "$SAVE_TO_SECRETS" ]; then
+    case "$SAVE_TO_SECRETS" in
+        op://*)  BACKEND_CLI=op ;;
+        inf://*) BACKEND_CLI=infisical ;;
+    esac
+    if ! command -v "$BACKEND_CLI" >/dev/null 2>&1; then
+        echo "error: --save-to-secrets $SAVE_TO_SECRETS needs the '$BACKEND_CLI' CLI on PATH" >&2
+        exit 3
+    fi
+fi
+
+# ── --bg re-exec ────────────────────────────────────────────────────────────
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    # Reconstruct the full arg list for the child (without --bg). Always
+    # forward the modern --save-to-secrets flag, even if the user invoked us
+    # with the deprecated alias — the daemonized child will land on the
+    # canonical path.
+    DAEMON_ARGS=("$LABEL")
+    [ -n "$SAVE_TO_SECRETS" ] && DAEMON_ARGS+=(--save-to-secrets "$SAVE_TO_SECRETS")
+    [ -n "$KEEP_DISK" ]       && DAEMON_ARGS+=(--keep-disk)
+    [ -n "$SIGNAL_FILE" ]     && DAEMON_ARGS+=(--signal-file "$SIGNAL_FILE")
+    [ -n "$SHRED_AFTER" ]     && DAEMON_ARGS+=(--shred-after "$SHRED_AFTER")
+    [ -n "$ENTRY_TYPE" ]      && DAEMON_ARGS+=(--type "$ENTRY_TYPE")
+    for f in "${FIELDS[@]}"; do
+        DAEMON_ARGS+=(--field "$f")
+    done
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "${DAEMON_ARGS[@]}" && {
+        echo "Secure entry: $ENTRY_URL"
+        if [ -n "$SAVE_TO_SECRETS" ] && [ -z "$KEEP_DISK" ]; then
+            echo "Secret will be written to: $SAVE_TO_SECRETS"
+        elif [ -n "$SAVE_TO_SECRETS" ]; then
+            if [ -n "$MULTI_MODE" ]; then
+                echo "Secrets will be written to: $SAVE_TO_SECRETS and $OUTPUT_PATH/"
+            else
+                echo "Secret will be written to: $SAVE_TO_SECRETS and $OUTPUT_PATH"
+            fi
+        else
+            if [ -n "$MULTI_MODE" ]; then
+                echo "Secrets will be saved to: $OUTPUT_PATH/<field>"
+            else
+                echo "Secret will be saved to: $OUTPUT_PATH"
+            fi
+        fi
+        [ -n "$SHRED_AFTER" ] && echo "Auto-shred: $SHRED_AFTER after submission"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+    tunnel_state_cleanup "$NAME"
+    if [ -n "$HTTP_PID" ]; then
+        kill "$HTTP_PID" 2>/dev/null
+        wait "$HTTP_PID" 2>/dev/null
+    fi
+    # If a signal file was registered and we own it, sweep it on tunnel exit.
+    [ -n "$SIGNAL_FILE" ] && rm -f "$SIGNAL_FILE"
+}
+
+trap cleanup EXIT INT TERM
+
+# ── Scheduled shred ─────────────────────────────────────────────────────────
+# --shred-after wipes the on-disk secret after a fixed delay. Detached with
+# setsid so it outlives both this process and the tunnel's own 1h expiry --
+# otherwise a secret dropped for a one-off task sits in /tmp until reboot.
+if [ -n "$SHRED_AFTER" ] && [ -n "$OUTPUT_PATH" ]; then
+    SHRED_SECS=$(python3 - "$SHRED_AFTER" <<'EOF'
+import re, sys
+v = sys.argv[1].strip().lower()
+m = re.fullmatch(r'(\d+)\s*([smhd]?)', v)
+if not m:
+    sys.exit(1)
+n = int(m.group(1))
+print(n * {'': 1, 's': 1, 'm': 60, 'h': 3600, 'd': 86400}[m.group(2)])
+EOF
+    ) || { echo "Invalid --shred-after: $SHRED_AFTER (try 90s, 30m, 2h)" >&2; exit 1; }
+
+    setsid bash -c '
+        # Wait for the secret to actually land, so the delay is measured from
+        # submission rather than launch -- "--shred-after 30m" then means 30
+        # minutes of usable life, however long the drop took. Give up waiting
+        # after an hour (the tunnel is gone by then anyway).
+        for _ in $(seq 1 3600); do [ -e "$1" ] && break; sleep 1; done
+        [ -e "$1" ] || exit 0
+        sleep "$2"
+        if [ -d "$1" ]; then
+            find "$1" -type f -exec shred -u {} \; 2>/dev/null
+            rmdir "$1" 2>/dev/null
+        elif [ -e "$1" ]; then
+            shred -u "$1" 2>/dev/null || rm -f "$1"
+        fi
+    ' _ "$OUTPUT_PATH" "$SHRED_SECS" >/dev/null 2>&1 &
+    echo "Secret will be shredded ${SHRED_SECS}s after it is submitted"
+fi
+
+# ── Launch server ───────────────────────────────────────────────────────────
+# --output is required by the server even when nothing is written to disk;
+# it is never created in that case.
+PYTHON_ARGS=(--port "$PORT" --label "$LABEL" --output "${OUTPUT_PATH:-/nonexistent/secure-entry-$LABEL}")
+[ -n "$SAVE_TO_SECRETS" ] && PYTHON_ARGS+=(--save-to-secrets "$SAVE_TO_SECRETS")
+[ -n "$KEEP_DISK" ]       && PYTHON_ARGS+=(--keep-disk)
+[ -n "$SIGNAL_FILE" ]     && PYTHON_ARGS+=(--signal-file "$SIGNAL_FILE")
+[ -n "$ENTRY_TYPE" ]      && PYTHON_ARGS+=(--type "$ENTRY_TYPE")
+for f in "${FIELDS[@]}"; do
+    PYTHON_ARGS+=(--field "$f")
+done
+
+python3 "$TUNNEL_DIR/lib/secureentry.py" "${PYTHON_ARGS[@]}" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+tunnel_state_register "$NAME" "secure-entry" $$ "$PORT"
+tunnel_state_watchdog "$NAME" "$SIGNAL_FILE" &
+
+if [ "${_CUSH_DAEMONIZED:-}" = "1" ]; then
+    # stdout here is logs/<name>.log. The parent already printed the full URL
+    # to its caller; the log gets the host only, never the path token.
+    echo "Secure entry: https://${NAME}.${PORCH_TUNNEL_BASE}/ (token URL printed by the launcher, not logged)"
+else
+    echo "Secure entry: $ENTRY_URL"
+fi
+if [ -n "$SAVE_TO_SECRETS" ] && [ -z "$KEEP_DISK" ]; then
+    echo "Secret will be written to: $SAVE_TO_SECRETS (no disk)"
+elif [ -n "$SAVE_TO_SECRETS" ]; then
+    if [ -n "$MULTI_MODE" ]; then
+        echo "Secrets will be written to: $SAVE_TO_SECRETS and $OUTPUT_PATH/"
+    else
+        echo "Secret will be written to: $SAVE_TO_SECRETS and $OUTPUT_PATH"
+    fi
+else
+    if [ -n "$MULTI_MODE" ]; then
+        echo "Secrets will be saved to: $OUTPUT_PATH/<field>"
+    else
+        echo "Secret will be saved to: $OUTPUT_PATH"
+    fi
+fi
+echo ""
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

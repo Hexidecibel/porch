@@ -1,0 +1,12 @@
+[Unit]
+Description=Porch landing page (${brand})
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 ${repo_dir}/lib/serveserver.py --port ${landing_port} --directory ${web_root} --allow-scripts
+Restart=always
+RestartSec=5
+WorkingDirectory=${repo_dir}
+
+[Install]
+WantedBy=default.target

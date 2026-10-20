@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+__HEAD__
+<link rel="stylesheet" href="__ASSET_app.css__">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>__TITLE__</title>
+</head>
+<body>
+<!-- The Porch app shell (Pocket). lib/pocketserver.py fills the
+     double-underscore placeholders: HEAD, TITLE, NONCE, CFG_JSON, and
+     ASSET_<file> = the hashed /static/ path of lib/pocket_static/<file>
+     (pocket_assets.asset_url). Everything inside #app is drawn by core.js
+     and the screen modules; the static parts here are the navigation, the
+     sheets, and the share widgets share.js binds to at load. -->
+<a class="skip" href="#main">Skip to content</a>
+<div class="app" id="app">
+  <nav class="app-nav" id="nav" aria-label="Porch">
+    <div class="nav-brand" aria-hidden="true">
+      <svg class="nav-mark" viewBox="0 0 64 64" width="28" height="28" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 30 L32 10 L56 30"/><path d="M16 28 V54 H48 V28"/><circle class="nav-mark-light" cx="32" cy="22" r="5.5" stroke="none"/></svg>
+      <span class="nav-brand-name">Porch</span>
+    </div>
+    <a class="nav-item" href="#/home" data-tab="home">
+      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5"/><path d="M6.5 10v9.5h11V10"/><path d="M10.5 19.5v-5h3v5"/></svg>
+      <span class="nav-label">Home</span></a>
+    <a class="nav-item" href="#/doors" data-tab="doors">
+      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20.5V4.5h12v16"/><path d="M3.5 20.5h17"/><circle cx="14.5" cy="12.5" r=".9" class="nav-dot"/></svg>
+      <span class="nav-label">Doors</span><span class="nav-count" id="navDoors" hidden></span></a>
+    <a class="nav-item" href="#/requests" data-tab="requests">
+      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg>
+      <span class="nav-label">Requests</span><span class="nav-badge" id="navReq" hidden></span></a>
+    <a class="nav-item" href="#/people" data-tab="people">
+      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19.5c.6-3.3 2.8-5 5.5-5s4.9 1.7 5.5 5"/><circle cx="16.8" cy="9.5" r="2.5"/><path d="M15.6 14.6c2.4-.3 4.4 1.2 4.9 4.4"/></svg>
+      <span class="nav-label">People</span></a>
+    <a class="nav-item" href="#/you" data-tab="you">
+      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 5 6.2v5.3c0 4.3 2.9 7.6 7 9 4.1-1.4 7-4.7 7-9V6.2z"/><path d="m9.2 12 2 2 3.8-4"/></svg>
+      <span class="nav-label">You</span></a>
+    <div class="nav-foot">
+      <button type="button" class="unlock-chip" id="navUnlock" hidden></button>
+      <span class="live-pill" id="navLive"><span class="live-dot"></span><span class="live-text">connecting</span></span>
+    </div>
+  </nav>
+
+  <div class="app-main">
+    <header class="app-top" id="top">
+      <a class="top-back" id="topBack" href="#/home" hidden aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg><span id="topBackLabel">Back</span></a>
+      <div class="top-title" id="topTitle">Porch</div>
+      <div class="top-side">
+        <button type="button" class="unlock-chip" id="topUnlock" hidden></button>
+        <span class="live-pill" id="topLive" aria-label="Live updates"><span class="live-dot"></span><span class="live-text">connecting</span></span>
+      </div>
+    </header>
+    <div class="app-banners" id="banners">
+      <div class="banner banner--warn" id="offlineBanner" role="status" hidden></div>
+      <div class="banner banner--warn" id="authBanner" role="status" hidden></div>
+    </div>
+    <main class="app-split" id="main" tabindex="-1">
+      <section class="pane pane-list" id="listPane" aria-label="List"></section>
+      <section class="pane pane-detail" id="detailPane" aria-label="Detail"></section>
+    </main>
+  </div>
+</div>
+
+<div class="signed-out" id="signedOut" hidden>
+  <div class="p-card signed-out-card">
+    <div class="p-kicker"><span>Signed out</span></div>
+    <h1 class="p-title">Signed out on this host</h1>
+    <p class="p-lede">Your owner session for this pocket ended. Sign in again to pick up where you left off.</p>
+    <a class="p-btn p-btn--lg p-btn--block" id="signInLink" href="/__porch/start" rel="nofollow">Sign in</a>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+
+<!-- Parking: the share widgets live here while Home is not on screen, so
+     share.js and the live updates always find them in the document. -->
+<div id="parking" hidden>
+  <div class="p-card shared-card" id="sharedCard" data-persist hidden>
+    <div class="p-section-label">Just shared</div>
+    <p class="small">Make a link for it? Each link is its own door with its own expiry.</p>
+    <div class="actions" id="sharedActions"></div>
+  </div>
+
+  <div class="home-share" id="homeShare" data-persist>
+    <div class="p-card clip-card" id="clipCard">
+      <div class="clip-head">
+        <div class="p-section-label" id="clipLabel">Clipboard</div>
+        <div class="clip-meta" id="clipMeta"></div>
+      </div>
+      <div id="clipBody"><p class="clip-empty">Nothing here yet. Paste something, or share to Porch from your phone.</p></div>
+      <div class="actions">
+        <button type="button" class="p-btn" id="copyBtn" disabled>Copy</button>
+        <button type="button" class="p-btn p-btn--ghost" id="pasteBtn" data-write>Paste from this device</button>
+        <button type="button" class="p-btn p-btn--quiet" id="linkClipBtn" data-write disabled>Make link</button>
+      </div>
+      <div class="paste-box" id="pasteBox" hidden>
+        <label class="p-label" for="pasteText">Text to put in the pocket</label>
+        <textarea class="p-textarea p-textarea--mono" id="pasteText" rows="4" maxlength="1048576"></textarea>
+        <div class="actions">
+          <button type="button" class="p-btn" id="sendBtn" data-write>Send to pocket</button>
+          <button type="button" class="p-btn p-btn--quiet" id="cancelBtn">Cancel</button>
+        </div>
+      </div>
+      <details class="clip-earlier" id="histBox" hidden>
+        <summary><span id="histLabel">Earlier</span></summary>
+        <div class="p-list" id="history"></div>
+      </details>
+    </div>
+
+    <div class="tiles" role="group" aria-label="Share something">
+      <!-- Android Chrome answers an input that accepts anything with a generic
+           Camera / Camcorder / Files chooser; only an image/video-only input
+           opens the system photo picker (the gallery). -->
+      <label class="tile pick" id="uploadBtn" for="fileInput">
+        <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5V4.5"/><path d="m7.5 9 4.5-4.5L16.5 9"/><path d="M4.5 15v4.5h15V15"/></svg>
+        <span class="tile-name">Upload files</span><span class="tile-sub">to the inbox</span>
+        <input type="file" id="fileInput" class="upload-input" multiple></label>
+      <label class="tile pick" id="photoBtn" for="photoInput">
+        <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3"/><circle cx="9" cy="10" r="1.7"/><path d="m4 17 5-4.5 3.5 3 2.5-2 4.5 4"/></svg>
+        <span class="tile-name">Photos &amp; videos</span><span class="tile-sub">from the gallery</span>
+        <input type="file" id="photoInput" class="upload-input" accept="image/*,video/*" multiple></label>
+      <button type="button" class="tile" id="sealBtn" data-write>
+        <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/><circle cx="12" cy="15.5" r="1.3"/></svg>
+        <span class="tile-name">Send encrypted</span><span class="tile-sub">end to end</span></button>
+      <button type="button" class="tile" id="makeLinkBtn" data-write>
+        <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
+        <span class="tile-name">Make link</span><span class="tile-sub">from inbox or clip</span></button>
+      <button type="button" class="tile" id="newDoorTile" data-write>
+        <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20.5V4.5h9"/><path d="M3.5 20.5h12"/><path d="M18.5 9v8M14.5 13h8"/></svg>
+        <span class="tile-name">New door</span><span class="tile-sub">drop, media, paste…</span></button>
+    </div>
+
+    <div class="p-card p-card--tight progress-wrap" id="progressWrap" hidden>
+      <div class="progress-text" id="progressText"></div>
+      <div class="p-progress"><span class="p-progress-fill" id="progressFill"></span></div>
+    </div>
+
+    <section class="home-sec" aria-labelledby="inboxLabel">
+      <div class="sec-head"><h2 class="sec-title" id="inboxLabel">Inbox</h2>
+        <button type="button" class="p-btn p-btn--quiet p-btn--sm" id="inboxAll" hidden>All files</button></div>
+      <div class="p-list" id="inbox"><div class="skel-rows"><div class="skel"></div><div class="skel"></div></div></div>
+    </section>
+
+    <section class="home-sec" aria-labelledby="linksLabel">
+      <div class="sec-head"><h2 class="sec-title" id="linksLabel">Links</h2></div>
+      <div class="p-list" id="links"><div class="skel-rows"><div class="skel"></div></div></div>
+    </section>
+  </div>
+</div>
+
+<!-- Make a link / Send encrypted (bound by share.js) -->
+<dialog class="sheet" id="sheet" aria-labelledby="sheetTitle">
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="sheet-pane" id="sheetForm">
+    <div>
+      <div class="p-kicker"><span id="sheetKicker">Make a link</span></div>
+      <h2 class="p-title p-title--sm" id="sheetTitle" tabindex="-1" autofocus></h2>
+      <p class="small" id="sheetWhat"></p>
+    </div>
+    <div class="seal-pick" id="sealPick" hidden>
+      <div class="actions">
+        <label class="p-btn p-btn--ghost pick" id="sealPickBtn" for="sealInput">Choose a file
+          <input type="file" id="sealInput" class="upload-input"></label>
+        <label class="p-btn p-btn--ghost pick photo-pick" id="sealPhotoBtn" for="sealPhotoInput"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="2.5" stroke="currentColor" stroke-width="1.8"/><circle cx="7.5" cy="8.5" r="1.6" fill="currentColor"/><path d="M3 14.5 L8 10.5 L11.5 13 L14 11 L17.5 14" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg> Photo or video
+          <input type="file" id="sealPhotoInput" class="upload-input" accept="image/*,video/*"></label>
+      </div>
+      <div class="seal-file" id="sealName">No file chosen</div>
+      <label class="p-label" for="sealText">or type a message</label>
+      <textarea class="p-textarea" id="sealText" rows="3" maxlength="1048576"></textarea>
+      <div class="p-field">
+        <div class="p-label" id="protLabel">Unlocks with</div>
+        <div class="chips" role="radiogroup" aria-labelledby="protLabel" id="protChips">
+          <button type="button" class="chip" role="radio" data-v="key">Key in the link</button>
+          <button type="button" class="chip" role="radio" data-v="password">A password</button>
+        </div>
+      </div>
+    </div>
+    <div class="p-field">
+      <div class="p-label" id="expLabel">Expires in</div>
+      <div class="chips" role="radiogroup" aria-labelledby="expLabel" id="expChips">
+        <button type="button" class="chip" role="radio" data-v="1h">1 hour</button>
+        <button type="button" class="chip" role="radio" data-v="24h">24 hours</button>
+        <button type="button" class="chip" role="radio" data-v="7d">7 days</button>
+        <button type="button" class="chip" role="radio" data-v="never">Never</button>
+      </div>
+    </div>
+    <div class="p-field" id="pwField">
+      <label class="p-label" for="linkPw" id="pwLabel">Password (optional)</label>
+      <input class="p-input" type="password" id="linkPw" autocomplete="new-password" maxlength="1024" spellcheck="false">
+      <div class="p-help" id="pwHelp">Visitors type it before they see anything.</div>
+    </div>
+    <div class="opts">
+      <label class="toggle"><input type="checkbox" id="linkBurn"><span><b>Burn after one open</b>
+        <span class="p-help">The door closes after the first visitor (encrypted links: after the first full download).</span></span></label>
+      <div class="p-field max-field">
+        <label class="p-label" for="linkMax">Max opens (optional)</label>
+        <input class="p-input" type="number" id="linkMax" min="1" max="1000" inputmode="numeric" placeholder="no limit">
+      </div>
+      <label class="toggle"><input type="checkbox" id="linkGuest"><span><b>Guest link</b>
+        <span class="p-help">A second link that lets its holder straight in.</span></span></label>
+    </div>
+    <div class="sheet-foot">
+      <div class="progress-wrap" id="sealProg" hidden>
+        <div class="progress-text" id="sealProgText"></div>
+        <div class="p-progress"><span class="p-progress-fill" id="sealProgFill"></span></div>
+      </div>
+      <div class="p-notice p-notice--error" id="sheetErr" role="alert" hidden></div>
+      <div class="sheet-actions">
+        <button type="button" class="p-btn p-btn--lg" id="sheetGo">Make link</button>
+        <button type="button" class="p-btn p-btn--quiet p-btn--lg" id="sheetCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <div class="sheet-pane" id="sheetResult" hidden>
+    <div>
+      <div class="p-kicker"><span>Link ready</span></div>
+      <h2 class="p-title p-title--sm" id="resTitle"></h2>
+    </div>
+    <div class="res-url"><code id="resUrl"></code></div>
+    <div class="actions">
+      <button type="button" class="p-btn" id="resCopy">Copy</button>
+      <button type="button" class="p-btn p-btn--ghost" id="resShare" hidden>Share</button>
+    </div>
+    <div class="qr-box" id="resQr"></div>
+    <div class="p-field" id="resGuest" hidden>
+      <div class="p-label">Guest link</div>
+      <div class="res-url"><code id="resGuestUrl"></code></div>
+      <div class="actions"><button type="button" class="p-btn p-btn--ghost p-btn--sm" id="resGuestCopy">Copy guest link</button></div>
+    </div>
+    <p class="small" id="resMeta"></p>
+    <div class="sheet-foot"><div class="sheet-actions"><button type="button" class="p-btn p-btn--quiet p-btn--lg" id="resDone">Done</button></div></div>
+  </div>
+</dialog>
+
+<!-- Every other form: core.js fills it per use (Porch.sheet). -->
+<dialog class="sheet" id="appSheet" aria-labelledby="appSheetTitle">
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="sheet-pane">
+    <div class="sheet-headline">
+      <div class="p-kicker"><span id="appSheetKicker"></span></div>
+      <h2 class="p-title p-title--sm" id="appSheetTitle" tabindex="-1"></h2>
+      <p class="small" id="appSheetText" hidden></p>
+    </div>
+    <div class="sheet-body" id="appSheetBody"></div>
+    <div class="sheet-foot" id="appSheetFoot">
+      <div class="p-notice p-notice--error" id="appSheetErr" role="alert" hidden></div>
+      <div class="sheet-actions" id="appSheetActions"></div>
+    </div>
+  </div>
+</dialog>
+
+<!-- Step-up: a passkey (Face ID, fingerprint) or the admin password. -->
+<dialog class="sheet sheet--stepup" id="stepSheet" aria-labelledby="stepTitle">
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="sheet-pane">
+    <div class="step-hero">
+      <span class="step-lock" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg></span>
+      <div>
+        <div class="p-kicker"><span>Confirm it’s you</span></div>
+        <h2 class="p-title p-title--sm" id="stepTitle" tabindex="-1">Unlock for 5 minutes</h2>
+      </div>
+    </div>
+    <p class="small" id="stepWhy">This changes who can get in. Confirm once and everything stays unlocked for 5 minutes.</p>
+    <div class="step-passkey" id="stepPasskeyBox">
+      <button type="button" class="p-btn p-btn--lg p-btn--block" id="stepPasskey">
+        <svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3.5H6A2.5 2.5 0 0 0 3.5 6v2M16 3.5h2A2.5 2.5 0 0 1 20.5 6v2M8 20.5H6A2.5 2.5 0 0 1 3.5 18v-2M16 20.5h2a2.5 2.5 0 0 0 2.5-2.5v-2"/><path d="M9 9.5v1M15 9.5v1M12 9.5v3.5h-1"/><path d="M9.2 15.5a4 4 0 0 0 5.6 0"/></svg>
+        <span id="stepPasskeyLabel">Use Face ID / fingerprint</span></button>
+    </div>
+    <div class="step-or" id="stepOr"><span>or</span></div>
+    <form class="step-pw" id="stepPwForm" autocomplete="on">
+      <label class="p-label" for="stepPw">Admin password</label>
+      <input class="p-input" type="password" id="stepPw" name="password" autocomplete="current-password" maxlength="1024" spellcheck="false" autocapitalize="off" required>
+      <button type="submit" class="p-btn p-btn--ghost p-btn--lg p-btn--block" id="stepPwGo">Unlock with password</button>
+    </form>
+    <div class="p-notice" id="stepMsg" role="status" hidden></div>
+    <p class="small step-nudge" id="stepNudge" hidden>No passkey yet. After this, add one under You → Passkeys and use Face ID next time.</p>
+    <div class="sheet-foot"><div class="sheet-actions"><button type="button" class="p-btn p-btn--quiet p-btn--lg" id="stepCancel">Cancel</button></div></div>
+  </div>
+</dialog>
+
+<script type="application/json" id="cfg" nonce="__NONCE__">__CFG_JSON__</script>
+<script defer src="/static/seal.js"></script>
+<script defer src="__ASSET_qr.js__"></script>
+<script defer src="__ASSET_tus.js__"></script>
+<script defer src="__ASSET_core.js__"></script>
+<script defer src="__ASSET_install.js__"></script>
+<script defer src="__ASSET_home.js__"></script>
+<script defer src="__ASSET_share.js__"></script>
+<script defer src="__ASSET_doors.js__"></script>
+<script defer src="__ASSET_inspect.js__"></script>
+<script defer src="__ASSET_requests.js__"></script>
+<script defer src="__ASSET_people.js__"></script>
+<script defer src="__ASSET_settings.js__"></script>
+<script defer src="__ASSET_boot.js__"></script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Deploy lib/authserver.py to the live cush-auth service.
+#
+#   1. back up data/devices.json to data/backups/ (0600; the server migrates it on start)
+#   2. byte-compile lib/authserver.py (and lib/porch_auth.py, which it imports),
+#      so a syntax error never reaches systemd
+#   3. check lib/auth.css is a fresh build of the classes in authserver.py
+#      (bin/auth-css --check); if not, stop before anything is restarted
+#   4. restart the cush-auth unit
+#   5. wait for /healthz
+#   6. confirm all four HAProxy maps exist and cush-protected.map still lists
+#      exactly the hosts in protected_apps
+#
+# Usage: bin/auth-deploy
+# Servers that read devices.json themselves (status API, music, media) are not
+# restarted here; they re-read it on mtime change.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+DEVICES="$TUNNEL_DIR/data/devices.json"
+MAPS_DIR="/etc/haproxy/maps"
+HEALTH_URL="http://127.0.0.1:9512/healthz"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
+die() { echo "!! $*" >&2; exit 1; }
+
+echo "==> backing up devices.json"
+[[ -f "$DEVICES" ]] || die "$DEVICES not found"
+# Backups go to data/backups/ (dir 0700, files 0600). It is gitignored, and
+# bin/publish-tarball ships nothing under data/ except links.json.
+backup_dir="$TUNNEL_DIR/data/backups"
+(umask 077; mkdir -p "$backup_dir")
+chmod 700 "$backup_dir"
+backup="$backup_dir/devices.json.bak-$(date +%Y%m%d-%H%M%S)"
+(umask 077; cp "$DEVICES" "$backup")
+chmod 600 "$backup"
+echo "    $backup"
+
+echo "==> compiling lib/authserver.py"
+python3 -m py_compile "$TUNNEL_DIR/lib/authserver.py" "$TUNNEL_DIR/lib/porch_auth.py"
+
+echo "==> checking lib/auth.css"
+# The pages are unstyled without it, and a class added to authserver.py has no
+# rule until the file is rebuilt. Checked here, before anything is restarted.
+"$TUNNEL_DIR/bin/auth-css" --check | sed 's/^/    /'
+
+echo "==> restarting cush-auth"
+sudo systemctl restart cush-auth
+
+echo "==> waiting for $HEALTH_URL"
+ok=""
+for _ in $(seq 1 30); do
+    if curl -fsS -o /dev/null --max-time 2 "$HEALTH_URL" 2>/dev/null; then
+        ok=1
+        break
+    fi
+    sleep 0.5
+done
+[[ -n "$ok" ]] || die "cush-auth did not become healthy; see: journalctl -u cush-auth -n 50"
+echo "    healthy"
+if [[ -f "$TUNNEL_DIR/data/.admin-setup-token" ]]; then
+    echo "    no admin configured yet: setup token is in data/.admin-setup-token"
+    echo "    (or run bin/auth-admin set-password)"
+fi
+
+echo "==> checking HAProxy maps"
+# sync_haproxy_maps runs right after load_state, before the port opens, so the
+# files are already rewritten by the time /healthz answers.
+for m in cush-devices.map cush-protected.map cush-grants.map cush-identity.map; do
+    [[ -f "$MAPS_DIR/$m" ]] || die "missing $MAPS_DIR/$m"
+    echo "    $m: $(wc -l < "$MAPS_DIR/$m") lines"
+done
+
+want="$(python3 - "$DEVICES" "$TUNNEL_DIR/lib" <<'PY'
+import json, re, sys
+sys.path.insert(0, sys.argv[2])
+import porch_config
+host_re = re.compile(r"^[a-z0-9-]+\." + re.escape(porch_config.get().root) + r"$")
+apps = json.load(open(sys.argv[1])).get("protected_apps", [])
+print("\n".join(h for h in apps if isinstance(h, str) and host_re.match(h.lower())))
+PY
+)"
+have="$(awk '{print $1}' "$MAPS_DIR/cush-protected.map")"
+if [[ "$want" != "$have" ]]; then
+    diff <(echo "$want") <(echo "$have") >&2 || true
+    die "cush-protected.map does not match protected_apps (devices.json backup: $backup)"
+fi
+echo "    cush-protected.map matches protected_apps ($(echo "$have" | grep -c .) hosts)"
+
+echo "==> done"

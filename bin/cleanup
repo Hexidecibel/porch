@@ -1,0 +1,165 @@
+#!/bin/bash
+# Clean up leftover temp files and logs from expired/closed cush-tools
+# Usage: bin/cleanup [--all] [--drops [days]] [--dry-run]
+
+# No `-e`: several counters here deliberately run commands that return
+# non-zero (dry-run reporting). `-u` is what matters — every path fed to
+# `rm -rf` below is built from a variable, and an unset one would expand to
+# a bare `rm -rf ""` or, worse, a prefix.
+set -uo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TUNNEL_STATE_DIR="/tmp/tunnel-state"
+
+DRY_RUN=""
+ALL=""
+DROPS=""
+DROPS_DAYS=7
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1 ;;
+        --all) ALL=1 ;;
+        --drops)
+            DROPS=1
+            if [ -n "${2:-}" ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                DROPS_DAYS="$2"; shift
+            fi
+            ;;
+        -h|--help)
+            echo "Usage: bin/cleanup [--all] [--drops [days]] [--dry-run]"
+            echo ""
+            echo "Clean up leftover temp files and logs from expired/closed tools."
+            echo ""
+            echo "Options:"
+            echo "  --all          Delete all temp files (skip 24h age check)"
+            echo "  --drops [days] Also delete drop dirs older than N days (default: 7)"
+            echo "  --dry-run      Show what would be deleted without deleting"
+            echo "  -h, --help     Show this help"
+            exit 0
+            ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+# Collect active tool names from state files
+active_names=""
+if [ -d "$TUNNEL_STATE_DIR" ]; then
+    for f in "$TUNNEL_STATE_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        active_names="$active_names $(basename "$f" .json)"
+    done
+fi
+
+do_remove() {
+    local path="$1" label="$2"
+    # Never let an empty or root-ish path reach `rm -rf`.
+    case "$path" in
+        ""|/|/*/..*|*/..|*/../*) echo "  refusing to delete: '$path'" >&2; return 1 ;;
+    esac
+    if [ -n "$DRY_RUN" ]; then
+        echo "  would delete: $path"
+        return 1  # signal: not actually deleted
+    else
+        rm -rf "$path"
+        return 0
+    fi
+}
+
+find_age_args() {
+    if [ -n "$ALL" ]; then
+        echo ""
+    else
+        echo "-mmin +1440"
+    fi
+}
+
+# ─── Secure-entry temps ─────────────────────────────────────────────────────
+count_secure=0
+if [ -d /tmp/secure-entry ]; then
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        do_remove "$f" "secure-entry" && count_secure=$((count_secure + 1)) || count_secure=$((count_secure + 1))
+    done < <(find /tmp/secure-entry -type f $(find_age_args) 2>/dev/null)
+fi
+
+# ─── Exchange temps ──────────────────────────────────────────────────────────
+count_exchange=0
+if [ -d /tmp/exchange ]; then
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        do_remove "$f" "exchange" && count_exchange=$((count_exchange + 1)) || count_exchange=$((count_exchange + 1))
+    done < <(find /tmp/exchange -type f $(find_age_args) 2>/dev/null)
+fi
+# Also clean stale exchange content files in /tmp
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    do_remove "$f" "exchange-temp" && count_exchange=$((count_exchange + 1)) || count_exchange=$((count_exchange + 1))
+done < <(find /tmp -maxdepth 1 -name "exchange-*-*" -type f $(find_age_args) 2>/dev/null)
+
+# ─── Stale frpc configs ─────────────────────────────────────────────────────
+# A long-lived tunnel's config is older than 24h but very much still in use —
+# the three verifi-* tunnels have been up for weeks. Collect the configs that a
+# running frpc still points at and leave those alone.
+in_use_configs=""
+for _p in $(pgrep -x frpc 2>/dev/null); do
+    if [ -r "/proc/$_p/cmdline" ]; then
+        _cmd="$(tr '\0' '\n' < "/proc/$_p/cmdline")"
+    else
+        _cmd="$(ps -o args= -p "$_p" 2>/dev/null | tr ' ' '\n')"
+    fi
+    for _arg in $_cmd; do
+        case "$_arg" in
+            /tmp/frpc-*.toml) in_use_configs="$in_use_configs $_arg" ;;
+        esac
+    done
+done
+
+count_config=0
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case " $in_use_configs " in
+        *" $f "*) continue ;;
+    esac
+    do_remove "$f" "frpc-config" && count_config=$((count_config + 1)) || count_config=$((count_config + 1))
+done < <(find /tmp -maxdepth 1 -name "frpc-*-*.toml" -type f $(find_age_args) 2>/dev/null)
+
+# ─── Dead logs ───────────────────────────────────────────────────────────────
+count_logs=0
+if [ -d "$TUNNEL_DIR/logs" ]; then
+    for logfile in "$TUNNEL_DIR/logs"/*.log; do
+        [ -f "$logfile" ] || continue
+        logname="$(basename "$logfile" .log)"
+        # Skip if this tool is still active
+        if echo "$active_names" | grep -qw "$logname"; then
+            continue
+        fi
+        do_remove "$logfile" "log" && count_logs=$((count_logs + 1)) || count_logs=$((count_logs + 1))
+    done
+fi
+
+# ─── Drop dirs (opt-in) ─────────────────────────────────────────────────────
+count_drops=0
+if [ -n "$DROPS" ] && [ -d "$HOME/drops" ]; then
+    while IFS= read -r d; do
+        [ -z "$d" ] && continue
+        do_remove "$d" "drop" && count_drops=$((count_drops + 1)) || count_drops=$((count_drops + 1))
+    done < <(find "$HOME/drops" -mindepth 1 -maxdepth 1 -type d -mtime +"$DROPS_DAYS" 2>/dev/null)
+fi
+
+# ─── Summary ─────────────────────────────────────────────────────────────────
+prefix="Cleaned"
+[ -n "$DRY_RUN" ] && prefix="Would clean"
+
+echo "$prefix $count_secure secure-entry file(s)"
+echo "$prefix $count_exchange exchange file(s)"
+echo "$prefix $count_config temp config(s)"
+echo "$prefix $count_logs stale log(s)"
+[ -n "$DROPS" ] && echo "$prefix $count_drops drop dir(s) older than ${DROPS_DAYS}d"
+
+total=$((count_secure + count_exchange + count_config + count_logs + count_drops))
+if [ "$total" -eq 0 ]; then
+    echo ""
+    echo "Nothing to clean."
+fi

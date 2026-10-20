@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+# porch-fake-router: test `porch connect upnp` against a fake home router.
+#
+# Usage: bin/porch-fake-router up [--no-upnp]   build the namespaces, start miniupnpd
+#        bin/porch-fake-router test [--keep]    up + every scenario + down (exit 1 on a failure)
+#        bin/porch-fake-router status           namespaces, routes, miniupnpd's mappings
+#        bin/porch-fake-router down             stop miniupnpd, delete the namespaces
+#        bin/porch-fake-router exec CMD...      run CMD as you inside the LAN namespace
+#
+# Two network namespaces joined by one veth pair, and nothing else:
+#   porchfr-lan   192.168.77.10/24, default route via .1     (porch runs here)
+#   porchfr-rtr   192.168.77.1/24 (LAN side) + a dummy "WAN" 11.22.33.44/24,
+#                 miniupnpd (UPnP IGD + NAT-PMP/PCP, nftables backend)
+# Neither namespace has an interface on the host's networks, so SSDP, NAT-PMP
+# and PCP can only reach miniupnpd. `test` proves it three ways before running
+# porch: each namespace's interface list (and no fr-* interface on the host),
+# `ip route get <host gateway>` (only via the fake router, which has no route
+# on), then a tcpdump on the fake router's LAN side shows the discovery landed
+# there. (The host's own interface is no witness: tailscaled's portmapper and
+# Home Assistant send NAT-PMP/SSDP to the real router on their own.)
+#
+# Needs root through `sudo -n` (ip netns, miniupnpd) plus the miniupnpd-nftables
+# and miniupnpc packages (`sudo apt install miniupnpd-nftables miniupnpc`; mask
+# the packaged service first: `sudo systemctl mask miniupnpd`). porch itself
+# runs as you (`sudo -u`), with PORCH_CONFIG=none and a throwaway PORCH_SETUP_DIR.
+# Not part of bin/test (it needs root); tests/test_porch_connect.py covers the
+# same code with in-process fakes.
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+LAN_NS=porchfr-lan
+RTR_NS=porchfr-rtr
+LAN_IP=192.168.77.10
+RTR_IP=192.168.77.1
+OTHER_IP=192.168.77.20
+WAN_IP=11.22.33.44
+ME="${SUDO_USER:-$(id -un)}"
+RUN="${PORCH_FAKE_ROUTER_DIR:-${XDG_RUNTIME_DIR:-/tmp}/porch-fake-router}"
+FAILS=0
+cap=""
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'porch-fake-router: %s\n' "$*" >&2; exit 2; }
+rsudo() { sudo -n "$@"; }
+in_rtr() { rsudo ip netns exec "$RTR_NS" "$@"; }
+# As the invoking user, inside the LAN namespace.
+in_lan() {
+    rsudo ip netns exec "$LAN_NS" sudo -n -u "$ME" env -i HOME="$HOME" PATH=/usr/bin:/bin \
+        PORCH_CONFIG=none PORCH_SETUP_DIR="$RUN/setup" \
+        PORCH_IP_ECHO="http://$WAN_IP:8080/a,http://$WAN_IP:8080/b" "$@"
+}
+
+need() {
+    sudo -n true 2>/dev/null || die "needs passwordless sudo (sudo -n)"
+    command -v miniupnpd >/dev/null || die "miniupnpd missing: sudo apt install miniupnpd-nftables miniupnpc"
+    command -v upnpc >/dev/null || die "upnpc missing: sudo apt install miniupnpc"
+    command -v nft >/dev/null || die "nft missing"
+}
+
+write_conf() { # $1 = yes|no for UPnP, $2 = yes|no for secure_mode
+    mkdir -p "$RUN" && chmod 700 "$RUN"
+    cat > "$RUN/miniupnpd.conf" <<EOF
+ext_ifname=fr-wan0
+listening_ip=fr-rtr0
+http_port=5000
+enable_upnp=$1
+enable_natpmp=yes
+secure_mode=$2
+system_uptime=yes
+notify_interval=60
+clean_ruleset_interval=0
+lease_file=$RUN/leases
+uuid=3c5f2a1e-0d6b-4e9f-9a77-7f0c2b1d5e01
+friendly_name=Porch Fake Router
+manufacturer_name=Porch Test
+model_name=Fake IGD
+min_lifetime=120
+max_lifetime=86400
+upnp_table_name=filter
+upnp_nat_table_name=filter
+allow 1-65535 192.168.77.0/24 1-65535
+deny 0-65535 0.0.0.0/0 0-65535
+EOF
+}
+
+nft_init() {
+    in_rtr nft -f - <<'EOF'
+table inet filter {
+    chain forward { type filter hook forward priority 0; policy drop; jump miniupnpd; }
+    chain miniupnpd { }
+    chain prerouting { type nat hook prerouting priority -100; policy accept; jump prerouting_miniupnpd; }
+    chain postrouting { type nat hook postrouting priority 100; policy accept; jump postrouting_miniupnpd; }
+    chain prerouting_miniupnpd { }
+    chain postrouting_miniupnpd { }
+}
+EOF
+}
+
+start_miniupnpd() {
+    : > "$RUN/miniupnpd.log"
+    # The "internet" echo service porch's probe asks for its public address
+    # (PORCH_IP_ECHO): answers the fake WAN address on every path.
+    in_rtr setsid python3 -I -c '
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = sys.argv[1].encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer((sys.argv[1], 8080), H).serve_forever()' "$WAN_IP" >>"$RUN/echo.log" 2>&1 < /dev/null &
+    in_rtr setsid miniupnpd -f "$RUN/miniupnpd.conf" -P "$RUN/miniupnpd.pid" -d \
+        >>"$RUN/miniupnpd.log" 2>&1 < /dev/null &
+    for _ in $(seq 50); do
+        in_rtr ss -lun 2>/dev/null | grep -q ':5351 ' && return 0
+        sleep 0.1
+    done
+    cat "$RUN/miniupnpd.log" >&2
+    die "miniupnpd did not start"
+}
+
+stop_miniupnpd() {
+    if [ -f "$RUN/miniupnpd.pid" ]; then
+        rsudo kill "$(cat "$RUN/miniupnpd.pid")" 2>/dev/null || true
+        sleep 0.5
+        rsudo rm -f "$RUN/miniupnpd.pid"
+    fi
+    # Only a miniupnpd inside our router namespace.
+    for pid in $(rsudo ip netns pids "$RTR_NS" 2>/dev/null); do rsudo kill "$pid" 2>/dev/null || true; done
+}
+
+cmd_up() {
+    local upnp=yes secure=no
+    [ "${1:-}" = "--no-upnp" ] && upnp=no
+    need
+    ip netns list | grep -qw "$LAN_NS" && die "already up (run: bin/porch-fake-router down)"
+    rsudo ip netns add "$RTR_NS"
+    rsudo ip netns add "$LAN_NS"
+    # Create the pair inside the router namespace, then move one end: neither
+    # end ever exists in the host namespace.
+    in_rtr ip link add fr-rtr0 type veth peer name fr-lan0
+    in_rtr ip link set fr-lan0 netns "$LAN_NS"
+    in_rtr ip link add fr-wan0 type dummy
+    in_rtr ip addr add "$RTR_IP/24" dev fr-rtr0
+    in_rtr ip addr add "$WAN_IP/24" dev fr-wan0
+    in_rtr ip link set lo up
+    in_rtr ip link set fr-rtr0 up
+    in_rtr ip link set fr-wan0 up
+    in_rtr sysctl -qw net.ipv4.ip_forward=1
+    rsudo ip netns exec "$LAN_NS" ip addr add "$LAN_IP/24" dev fr-lan0
+    rsudo ip netns exec "$LAN_NS" ip addr add "$OTHER_IP/24" dev fr-lan0
+    rsudo ip netns exec "$LAN_NS" ip link set lo up
+    rsudo ip netns exec "$LAN_NS" ip link set fr-lan0 up
+    rsudo ip netns exec "$LAN_NS" ip route add default via "$RTR_IP" src "$LAN_IP"
+    nft_init
+    write_conf "$upnp" "$secure"
+    rm -rf "$RUN/setup"; mkdir -p "$RUN/setup"; chmod 700 "$RUN/setup"
+    start_miniupnpd
+    say "fake router up: $RTR_NS ($RTR_IP, WAN $WAN_IP, UPnP=$upnp), $LAN_NS ($LAN_IP)"
+}
+
+cmd_down() {
+    stop_miniupnpd
+    rsudo ip netns del "$LAN_NS" 2>/dev/null || true
+    rsudo ip netns del "$RTR_NS" 2>/dev/null || true
+    [ -d "$RUN" ] && rsudo rm -rf "$RUN"
+    if ip netns list | grep -qE "$LAN_NS|$RTR_NS"; then die "namespaces still present"; fi
+    say "fake router down"
+}
+
+restart_router() { # $1 = yes|no UPnP, $2 = secure_mode
+    stop_miniupnpd
+    in_rtr nft flush chain inet filter prerouting_miniupnpd
+    in_rtr nft flush chain inet filter postrouting_miniupnpd
+    in_rtr nft flush chain inet filter miniupnpd
+    rsudo rm -f "$RUN/leases"
+    write_conf "$1" "$2"
+    start_miniupnpd
+    rm -rf "$RUN/setup"; mkdir -p "$RUN/setup"; chmod 700 "$RUN/setup"
+}
+
+# DNAT rules miniupnpd holds, as "port->ip:port" lines.
+mappings() {
+    in_rtr nft list chain inet filter prerouting_miniupnpd 2>/dev/null \
+        | sed -nE 's/.* dport ([0-9]+) dnat ip to ([0-9.]+):([0-9]+).*/\1->\2:\3/p' | sort -n
+}
+
+check() { # $1 = label, rest = command that must succeed
+    local label="$1"; shift
+    if "$@"; then say "  ok    $label"; else say "  FAIL  $label"; FAILS=$((FAILS + 1)); fi
+}
+has() { mappings | grep -qx "$1"; }
+hasnt() { ! mappings | grep -q "^$1->"; }
+porch() { in_lan "$REPO/bin/porch" "$@"; }
+
+isolation() {
+    local gw ifs
+    gw="$(ip -4 route show default | awk '{print $3; exit}')"
+    ifs="$(rsudo ip netns exec "$LAN_NS" ip -o link | awk -F': ' '{print $2}' | sed 's/@.*//' | sort | tr '\n' ' ')"
+    check "LAN namespace has only lo + fr-lan0 ($ifs)" [ "$ifs" = "fr-lan0 lo " ]
+    ifs="$(in_rtr ip -o link | awk -F': ' '{print $2}' | sed 's/@.*//' | sort | tr '\n' ' ')"
+    check "router namespace has only lo, fr-rtr0, fr-wan0 ($ifs)" [ "$ifs" = "fr-rtr0 fr-wan0 lo " ]
+    check "no fr-* interface in the host namespace" bash -c "! ip -o link | grep -q ' fr-'"
+    if [ -n "$gw" ]; then
+        check "the host gateway $gw is only reachable via the fake router" \
+            bash -c "sudo -n ip netns exec $LAN_NS ip route get $gw | grep -q 'via $RTR_IP dev fr-lan0'"
+        check "the fake router has no route to $gw" \
+            bash -c "! sudo -n ip netns exec $RTR_NS ip route get $gw >/dev/null 2>&1 || sudo -n ip netns exec $RTR_NS ip route get $gw | grep -q fr-wan0"
+    fi
+}
+
+scenarios() {
+    local out
+    say "== detection (porch connect --status --json)"
+    out="$(porch connect --status --json)"
+    check "probe sees the gateway $RTR_IP" grep -q "\"gateway\": \"$RTR_IP\"" <<<"$out"
+    check "probe sees the router's WAN address $WAN_IP" grep -q "\"wan_ipv4\": \"$WAN_IP\"" <<<"$out"
+    check "probe finds the UPnP IGD" python3 -c 'import json,sys; f=json.load(sys.stdin)["facts"]; sys.exit(0 if f.get("upnp") else 1)' <<<"$out"
+    check "upnp mode is offered (works/likely)" python3 -c 'import json,sys; r=[m for m in json.load(sys.stdin)["modes"] if m["name"]=="upnp"][0]; sys.exit(0 if r["status"] in ("works","likely") else 1)' <<<"$out"
+
+    say "== UPnP: map, verify, refresh, off"
+    check "porch connect upnp --yes" porch connect upnp --yes
+    for p in 80 443 7000; do check "router forwards $p -> $LAN_IP:$p" has "$p->$LAN_IP:$p"; done
+    check "upnpc -l lists the porch mappings" bash -c "sudo -n ip netns exec $LAN_NS upnpc -l 2>/dev/null | grep -q \"porch 443\""
+    check "porch connect upnp --refresh" porch connect upnp --refresh
+    for p in 80 443 7000; do check "still forwards $p after refresh" has "$p->$LAN_IP:$p"; done
+    check "porch connect --off --yes" porch connect --off --yes
+    for p in 80 443 7000; do check "mapping $p removed" hasnt "$p"; done
+
+    say "== UPnP: a permanent mapping someone else made is kept"
+    rsudo ip netns exec "$LAN_NS" upnpc -m fr-lan0 -e manual -a "$LAN_IP" 443 443 TCP 0 >/dev/null 2>&1 || true
+    check "pre-existing 443 -> $LAN_IP (permanent, 'manual')" has "443->$LAN_IP:443"
+    check "porch connect upnp --yes" porch connect upnp --yes
+    for p in 80 7000; do check "router forwards $p" has "$p->$LAN_IP:$p"; done
+    check "porch connect --off --yes" porch connect --off --yes
+    check "80 removed" hasnt 80
+    check "7000 removed" hasnt 7000
+    check "the pre-existing 443 mapping is still there" has "443->$LAN_IP:443"
+    rsudo ip netns exec "$LAN_NS" upnpc -m fr-lan0 -d 443 TCP >/dev/null 2>&1 || true
+
+    say "== UPnP: a port that forwards to another machine stops the step"
+    rsudo ip netns exec "$LAN_NS" upnpc -m fr-lan0 -e other-box -a "$OTHER_IP" 7000 7000 TCP 3600 >/dev/null 2>&1 || true
+    check "pre-existing 7000 -> $OTHER_IP" has "7000->$OTHER_IP:7000"
+    out="$(porch connect upnp --yes 2>&1 || true)"
+    check "porch refuses with connect.upnp.conflict" grep -q "connect.upnp.conflict" <<<"$out"
+    check "the other machine's 7000 mapping is untouched" has "7000->$OTHER_IP:7000"
+    check "80 and 443 are not left behind" bash -c "! (sudo -n ip netns exec $RTR_NS nft list chain inet filter prerouting_miniupnpd | grep -Eq 'dport (80|443) ')"
+    porch connect --off --yes >/dev/null 2>&1 || true
+    check "80/443 gone after --off as well" bash -c "! (sudo -n ip netns exec $RTR_NS nft list chain inet filter prerouting_miniupnpd | grep -Eq 'dport (80|443) ')"
+
+    say "== NAT-PMP (router with UPnP turned off)"
+    restart_router no yes
+    out="$(porch connect --status --json)"
+    check "probe finds no IGD but NAT-PMP" python3 -c 'import json,sys; f=json.load(sys.stdin)["facts"]; sys.exit(0 if not f.get("upnp") and (f.get("natpmp") or {}).get("natpmp") else 1)' <<<"$out"
+    check "porch connect upnp --yes (NAT-PMP)" porch connect upnp --yes
+    for p in 80 443 7000; do check "router forwards $p -> $LAN_IP:$p" has "$p->$LAN_IP:$p"; done
+    check "porch connect upnp --refresh" porch connect upnp --refresh
+    check "porch connect --off --yes" porch connect --off --yes
+    for p in 80 443 7000; do check "mapping $p removed" hasnt "$p"; done
+}
+
+cmd_test() {
+    local keep=0 pid=""
+    [ "${1:-}" = "--keep" ] && keep=1
+    need
+    ip netns list | grep -qw "$LAN_NS" && cmd_down >/dev/null
+    [ "$keep" = 1 ] || trap 'cmd_down >/dev/null 2>&1 || true; [ -n "$cap" ] && rm -f "$cap"' EXIT
+    cmd_up
+    # What reached the fake router (on its LAN side), to show where porch's
+    # discovery went. The host's own interface is not a useful witness: other
+    # software on a box (tailscaled's portmapper, Home Assistant's SSDP) sends
+    # NAT-PMP/SSDP to the real router all the time.
+    cap="$(mktemp)"
+    in_rtr tcpdump -i fr-rtr0 -n -l 'udp and (dst port 1900 or dst port 5351)' > "$cap" 2>/dev/null &
+    pid=$!
+    sleep 1
+    say "== isolation"
+    isolation
+    if [ "$FAILS" -gt 0 ]; then say "isolation failed: not running porch"; exit 1; fi
+    scenarios
+    sleep 1
+    for p in $(rsudo ip netns pids "$RTR_NS" 2>/dev/null); do
+        [ "$(cat /proc/"$p"/comm 2>/dev/null)" = tcpdump ] && rsudo kill "$p" 2>/dev/null
+    done
+    wait "$pid" 2>/dev/null || true
+    check "porch's SSDP/NAT-PMP reached the fake router ($(grep -c . "$cap") packets on fr-rtr0)" [ -s "$cap" ]
+    say ""
+    if [ "$FAILS" -eq 0 ]; then say "fake router: all checks passed"; else say "fake router: $FAILS check(s) failed"; fi
+    [ "$keep" = 1 ] && say "kept up; bin/porch-fake-router down when done"
+    [ "$FAILS" -eq 0 ]
+}
+
+cmd_status() {
+    ip netns list | grep -E "$LAN_NS|$RTR_NS" || { say "fake router: down"; return 0; }
+    say "-- $LAN_NS routes"; rsudo ip netns exec "$LAN_NS" ip route
+    say "-- miniupnpd mappings"; mappings
+}
+
+case "${1:-}" in
+    up) shift; cmd_up "$@" ;;
+    down) cmd_down ;;
+    test) shift; cmd_test "$@" ;;
+    status) cmd_status ;;
+    exec) shift; in_lan "$@" ;;
+    -h|--help|"") sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command: $1 (up, test, status, down, exec)" ;;
+esac

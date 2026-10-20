@@ -1,0 +1,27 @@
+# frp client configuration
+serverAddr = "127.0.0.1"
+serverPort = 7000
+
+# Empty on purpose — the real auth is the per-device token in [metadatas] below.
+# frp 0.67.0 requires auth.method = "token" to be set, but the shared token is
+# unused; the cush-auth HTTP plugin on the server validates metas.device_token.
+auth.method = "token"
+auth.token = ""
+
+# Heartbeats carry the Ping plugin op, which is where the cush-auth server
+# notices a revoked device that is already connected. frp switches them off by
+# default while tcpMux is on (the default), so they are set explicitly here.
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+
+# Tunnels are added dynamically via the tunnel script
+
+# Per-device token, issued by the cush-auth pairing flow and checked by the
+# server on Login, NewProxy, NewWorkConn and every heartbeat (Ping).
+# Run `bin/bootstrap` or `curl https://<landing host>/install.sh | sh` to get one.
+# The server box itself uses data/.home-frpc-token, which bin/tunnel fills in
+# when this is empty. The old "127.0.0.1 needs no token" localhost bypass is
+# off by default (PORCH_LOCALHOST_BYPASS / [adopt] localhost_bypass in
+# config/porch.toml); keep it off.
+[metadatas]
+device_token = ""

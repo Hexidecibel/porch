@@ -1,0 +1,13 @@
+# Paths bin/public-export leaves out of the public repo.
+# One per line, relative to the repo root. A trailing "/" means a directory
+# (and everything under it). Blank lines and "#" comments are ignored.
+# This file itself is exported, so the list is visible to everyone.
+
+# Working notes and assistant instructions for this checkout
+todo.md
+lessons.md
+CLAUDE.md
+.claude/
+
+# The personal-marker list bin/public-export scans for (private by nature)
+share/public-export-markers.txt

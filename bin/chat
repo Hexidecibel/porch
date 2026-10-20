@@ -1,0 +1,87 @@
+#!/bin/bash
+# Launch a chat UI and tunnel it
+# Usage: bin/chat [name] [--bg] [--llm-url URL] [--llm-model MODEL]
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: chat [name] [--bg] [--llm-url URL] [--llm-model MODEL]"
+  echo ""
+  echo "Launch a chat UI and tunnel it."
+  echo ""
+  echo "Options:"
+  echo "  name         Subdomain name (default: chat)"
+  echo "  --bg         Daemonize the process"
+  echo "  --llm-url    LLM API endpoint (default: http://127.0.0.1:9600)"
+  echo "  --llm-model  Model name (default: default — the router alias that"
+  echo "               follows fleet routing policy; naming a concrete model"
+  echo "               pins the request to one host)"
+  echo ""
+  echo "Examples:"
+  echo "  chat                         -> chat.${PORCH_TUNNEL_BASE}"
+  echo "  chat mychat                  -> mychat.${PORCH_TUNNEL_BASE}"
+  echo "  chat mychat --llm-url http://localhost:8080 --bg"
+  exit 0
+fi
+
+BG_MODE=""
+LLM_URL="http://127.0.0.1:9600"
+# Router alias, not a concrete model name: naming a model pins the request to
+# whichever host serves it and bypasses the router's own placement (a big
+# model forced onto a CPU-only host can starve everything else on it).
+LLM_MODEL="default"
+ORIG_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bg) BG_MODE=1; shift ;;
+        --llm-url) LLM_URL="$2"; shift 2 ;;
+        --llm-model) LLM_MODEL="$2"; shift 2 ;;
+        *) ORIG_ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${ORIG_ARGS[@]}"
+
+NAME="${1:-chat}"
+tunnel_require_valid_name "$NAME"
+
+# --bg daemonize
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" "--llm-url" "$LLM_URL" "--llm-model" "$LLM_MODEL" && {
+        echo "Chat UI: https://${NAME}.${PORCH_TUNNEL_BASE}"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Start chat server in the background
+python3 "$TUNNEL_DIR/lib/chatserver.py" --port "$PORT" --name "$NAME" --llm-url "$LLM_URL" --llm-model "$LLM_MODEL" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+tunnel_state_register "$NAME" "chat" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "Chat UI: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo ""
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

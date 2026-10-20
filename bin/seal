@@ -1,0 +1,172 @@
+#!/bin/bash
+# Share one end-to-end encrypted file (porch-seal v1, lib/porch_seal.py) through
+# a door that only ever holds ciphertext (lib/sealserver.py). The key is in the
+# link's #k= fragment (or the recipient types the password); this launcher
+# never sees it.
+# Usage: bin/seal <file.pseal> [name] [--owned-file] [--owned-dir DIR] [door flags] [--bg]
+# Example: bin/seal /run/user/1000/porch/share/report.pseal report --owned-file --bg
+#          (porch share --e2e report.pdf does the sealing and prints the full link)
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+usage() {
+  echo "Usage: seal <file.pseal> [name] [--owned-file] [--owned-dir DIR] [door flags] [--bg]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "Shares a sealed (end-to-end encrypted) file. The page decrypts it in the"
+  echo "browser with the key from the link's #k= fragment, or a password."
+  echo "--burn / --max-opens count COMPLETE downloads of the ciphertext (not page"
+  echo "views): once the limit is reached the blob is refused, an owned file is"
+  echo "deleted at once and the door closes after a short grace."
+  echo "--owned-file: delete the file when the door closes (or burns). Only honoured"
+  echo "  for a file directly in the private share dir (\$XDG_RUNTIME_DIR/porch/share/)"
+  echo "  or directly in a directory given with --owned-dir (yours, not group/world"
+  echo "  writable, not / or \$HOME)."
+  echo ""
+  echo "Make a sealed file with: porch share --e2e <file>  (or lib/porch_seal.py seal)"
+}
+
+BG_MODE=""
+OWNED=""
+OWNED_DIR=""
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bg) BG_MODE=1 ;;
+    --owned-file) OWNED=1 ;;
+    --owned-dir)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then echo "Error: --owned-dir needs a directory" >&2; exit 2; fi
+      OWNED_DIR="$2"; shift ;;
+    --owned-dir=*) OWNED_DIR="${1#*=}" ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "Error: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    *) POS+=("$1") ;;
+  esac
+  shift
+done
+
+FILE="${POS[0]:-}"
+NAME="${POS[1]:-}"
+if [ -z "$FILE" ] || [ "${#POS[@]}" -gt 2 ]; then
+  usage >&2
+  exit 1
+fi
+if [ -n "$OWNED_DIR" ] && [ -z "$OWNED" ]; then
+  echo "Error: --owned-dir only makes sense with --owned-file" >&2
+  exit 2
+fi
+if [ ! -f "$FILE" ] || [ ! -r "$FILE" ]; then
+  echo "Error: cannot read file: $FILE" >&2
+  exit 1
+fi
+# Resolve now: the daemon re-exec must see the same file whatever its cwd.
+FILE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$FILE")"
+
+# Refuse anything that is not a porch-seal v1 file (header + a length that adds up).
+if ! python3 "$TUNNEL_DIR/lib/porch_seal.py" info "$FILE" >/dev/null; then
+  echo "Error: $FILE is not a sealed file (porch-seal v1)" >&2
+  exit 1
+fi
+
+# --owned-file: ours to delete, but only a direct child of the private share
+# run dir or of an --owned-dir that is really ours; anything else is refused
+# rather than deleted.
+if [ -n "$OWNED" ]; then
+  python3 - "$FILE" "$OWNED_DIR" "$TUNNEL_DIR/lib" <<'PY' || exit 2
+import os, stat, sys
+f, owned_dir, lib = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, lib)
+import rundir
+allowed = []
+try:
+    allowed.append(os.path.realpath(rundir.tool_dir('share')))
+except Exception as e:  # noqa: BLE001
+    pass
+if owned_dir:
+    d = os.path.realpath(owned_dir)
+    try:
+        st = os.stat(d)
+    except OSError:
+        sys.exit(f'Error: --owned-dir {owned_dir} does not exist')
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+        sys.exit(f'Error: --owned-dir {owned_dir} must be a directory of yours, not group/world writable')
+    if d in ('/', os.path.realpath(os.path.expanduser('~'))):
+        sys.exit(f'Error: --owned-dir cannot be {d}')
+    allowed.append(d)
+if os.path.dirname(f) not in allowed:
+    sys.exit('Error: --owned-file only applies to files directly in ' + ' or '.join(allowed))
+PY
+fi
+
+[ -n "$NAME" ] || NAME="seal-$(head -c3 /dev/urandom | xxd -p)"
+tunnel_require_valid_name "$NAME"
+
+OWN_FLAGS=()
+[ -n "$OWNED" ] && OWN_FLAGS+=(--owned-file)
+[ -n "$OWNED_DIR" ] && OWN_FLAGS+=(--owned-dir "$OWNED_DIR")
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" "$NAME" || exit 2
+
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$FILE" "$NAME" "${OWN_FLAGS[@]}" && {
+        echo "Seal: https://${NAME}.${PORCH_TUNNEL_BASE}/"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+  # An expired or owner-closed door keeps its file for a reopen
+  # (lib/door_recipe.py, 7 days); a burned or used-up one never does.
+  if [ "$(door_owned_release "$NAME")" != keep ] && [ -n "$OWNED" ]; then
+    rm -f -- "$FILE"
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+SEAL_FLAGS=()
+[ -n "$OWNED" ] && SEAL_FLAGS+=(--owned-file)
+python3 "$TUNNEL_DIR/lib/sealserver.py" --port "$PORT" --file "$FILE" --name "$NAME" \
+  --state-dir "$TUNNEL_STATE_DIR" --devices "$TUNNEL_DIR/data/devices.json" "${SEAL_FLAGS[@]}" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+RECIPE_ARGS=(--path "$FILE")
+[ -n "$OWNED" ] && RECIPE_ARGS+=(--owned "$FILE")
+[ -n "$OWNED_DIR" ] && RECIPE_ARGS+=(--owned-dir "$OWNED_DIR")
+door_recipe_write "$NAME" seal "${RECIPE_ARGS[@]}"
+tunnel_state_register "$NAME" "seal" $$ "$PORT"
+# Opens on a seal door are complete ciphertext downloads, counted by
+# sealserver; the door proxy must not count page views on top.
+python3 "$TUNNEL_DIR/lib/door_state.py" set-opens-by "${TUNNEL_STATE_DIR}/${NAME}.json" app || exit 1
+tunnel_state_watchdog "$NAME" &
+
+echo "Sealed file $FILE on http://127.0.0.1:$PORT"
+echo "Seal: https://${NAME}.${PORCH_TUNNEL_BASE}/"
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

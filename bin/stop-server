@@ -1,0 +1,24 @@
+#!/bin/bash
+# Stop the frp server
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# Matched by executable name + command line, never by a loose `pkill -f`
+# substring: "frps.*frps.toml" also matches any shell that mentions both.
+frps_pids="$(cush_pids_for 'frps' 'frps.toml')"
+if [ -n "$frps_pids" ]; then
+  echo "Stopping frps (PID: $(echo "$frps_pids" | tr '\n' ' '))..."
+  for pid in $frps_pids; do kill "$pid" 2>/dev/null; done
+  echo "Stopped."
+else
+  echo "frps is not running."
+fi
+
+status_pids="$(cush_pids_for 'python*' 'statusserver.py')"
+if [ -n "$status_pids" ]; then
+  echo "Stopping status API (PID: $(echo "$status_pids" | tr '\n' ' '))..."
+  for pid in $status_pids; do kill "$pid" 2>/dev/null; done
+  echo "Status API stopped."
+else
+  echo "Status API is not running."
+fi

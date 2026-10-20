@@ -1,0 +1,147 @@
+#!/bin/bash
+# Start a media-collect / gallery server (photos AND video) and expose it via tunnel.
+# Usage: bin/media [name] [--view-only] [--bg]
+# Example: bin/media             -> random subdomain like media-a1b2c3.tunnel.cush.rocks
+#          bin/media wedding     -> wedding.tunnel.cush.rocks
+#          bin/media reel --view-only -> guests can watch, not add or download
+#
+# Anyone with the link can browse, play, download and ADD photos/video.
+# Deleting and reordering are unlocked automatically for the owner — any
+# browser enrolled with cush-auth (it carries the .cush.rocks cush_auth
+# cookie). No key to manage, and guests never see a delete button.
+#
+# --view-only takes guests down to watching: the server refuses their uploads
+# and forced downloads, and the page drops the add and download controls. The
+# owner keeps everything. It deters casual saving; it can't stop a determined
+# viewer (dev tools, screen recording).
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+# Strip --bg and --view-only from args early
+BG_MODE=""
+VIEW_ONLY=""
+NO_GUEST_UPLOAD=""
+ORIG_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--bg" ]; then BG_MODE=1
+    elif [ "$arg" = "--view-only" ]; then VIEW_ONLY=1
+    elif [ "$arg" = "--no-guest-upload" ]; then NO_GUEST_UPLOAD=1
+    else ORIG_ARGS+=("$arg"); fi
+done
+set -- "${ORIG_ARGS[@]}"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: media [name] [--view-only|--no-guest-upload] [--bg]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "Start a media-collect server (photos + video) and expose it via tunnel."
+  echo "Anyone with the link can browse the gallery, play video, download, and"
+  echo "add their own photos/video. The owner — any cush-auth-enrolled browser —"
+  echo "automatically gets delete + drag-to-reorder; guests get view & add only."
+  echo ""
+  echo "--view-only: guests can browse and play but not upload or download."
+  echo "--no-guest-upload: guests can browse, play and download but not upload."
+  echo "The server refuses their uploads and ?dl= downloads, and the page hides"
+  echo "the add and download controls. The owner keeps full control. This deters"
+  echo "casual saving; it can't stop a determined viewer (dev tools, screen"
+  echo "recording)."
+  echo ""
+  echo "Video streams with HTTP Range support, so seeking works everywhere"
+  echo "(including iOS Safari, which refuses to play a non-ranged video at all)."
+  echo ""
+  echo "Examples:"
+  echo "  media               -> random subdomain (e.g. media-a1b2c3.${PORCH_TUNNEL_BASE})"
+  echo "  media wedding       -> wedding.${PORCH_TUNNEL_BASE}"
+  echo "  media reel --view-only --bg -> reel.${PORCH_TUNNEL_BASE}, watch-only for guests"
+  echo ""
+  echo "Media is saved to ~/media/<name>/"
+  exit 0
+fi
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  NAME="media-$(head -c3 /dev/urandom | xxd -p)"
+fi
+# $NAME also names the directory under ~/media — validate before mkdir.
+tunnel_require_valid_name "$NAME"
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" "$NAME" || exit 2
+
+# Handle --bg mode (after name resolution)
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    # The re-exec only sees the args passed here, so --view-only has to be
+    # handed on explicitly. It also lands in the launch history this way,
+    # which is what a revive from the status console replays.
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" ${VIEW_ONLY:+--view-only} \
+            ${NO_GUEST_UPLOAD:+--no-guest-upload} && {
+        echo "Media: https://${NAME}.${PORCH_TUNNEL_BASE}"
+        echo "Media will be saved to: $HOME/media/$NAME/"
+        [ -n "$VIEW_ONLY" ] && echo "View-only: guests can watch, not add or download"
+        [ -n "$NO_GUEST_UPLOAD" ] && echo "No guest uploads: guests can watch and download, not add"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+MEDIA_DIR="$HOME/media/$NAME"
+mkdir -p "$MEDIA_DIR"
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  door_owned_release "$NAME" >/dev/null     # records "closed" if nobody said why
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Start the media server in the background. --devices points at the cush-auth
+# registry so the owner's enrolled browser is recognized automatically; without
+# a match nobody is an owner, so the gallery stays view+add only (fail closed).
+# With --view-only and no match, nobody can add either: the gallery is frozen.
+EXTRA_ARGS=()
+[ -n "$VIEW_ONLY" ] && EXTRA_ARGS+=(--view-only)
+[ -n "$NO_GUEST_UPLOAD" ] && EXTRA_ARGS+=(--no-guest-upload)
+python3 "$TUNNEL_DIR/lib/mediaserver.py" \
+    --port "$PORT" \
+    --bind 127.0.0.1 \
+    --dir "$MEDIA_DIR" \
+    --kinds image,video \
+    --devices "$TUNNEL_DIR/data/devices.json" \
+    --title "$NAME" "${EXTRA_ARGS[@]}" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+door_recipe_write "$NAME" media ${VIEW_ONLY:+--flag --view-only} \
+    ${NO_GUEST_UPLOAD:+--flag --no-guest-upload}
+tunnel_state_register "$NAME" "media" $$ "$PORT" ${VIEW_ONLY:+--view-only} \
+    ${NO_GUEST_UPLOAD:+--no-guest-upload}
+tunnel_state_watchdog "$NAME" &
+
+echo "Media: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo "Media will be saved to: $MEDIA_DIR"
+[ -n "$VIEW_ONLY" ] && echo "View-only: guests can watch, not add or download"
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

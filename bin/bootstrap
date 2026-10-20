@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import socket
+import ssl
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from urllib import request, error
+from urllib.parse import urlparse
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+try:
+    import porch_config  # lib/porch_config.py; ships in the tarball
+except ImportError:  # a hand-copied bin/bootstrap
+    porch_config = None
+
+
+def _default_auth_url():
+    """The paired server's landing URL from this machine's Porch config
+    (config/porch.toml, written at pairing, or PORCH_* env), else None: the
+    built-in defaults name the author's server, which a stranger's machine
+    must never be pointed at silently."""
+    if porch_config is not None:
+        try:
+            cfg = porch_config.get()
+        except porch_config.ConfigError as e:
+            sys.stderr.write(f"[bootstrap] ignoring Porch config: {e}\n")
+            return None
+        configured = cfg.source or any(os.environ.get(k) for k in (
+            "PORCH_DOMAIN", "PORCH_LANDING_HOST", "PORCH_TUNNEL_BASE"))
+        if configured:
+            return f"https://{cfg.landing_host}"
+    return None
+
+
+DEFAULT_AUTH_URL = _default_auth_url()
+POLL_TIMEOUT = 35
+POLL_BACKOFF = 2
+
+
+def log(msg):
+    sys.stderr.write(msg)
+    sys.stderr.flush()
+
+
+def _resolve_ca_bundle():
+    """Pick a CA bundle that macOS/Linux Python will trust. Returns a path or None."""
+    import os, ssl
+    # Honor explicit override
+    for env in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        p = os.environ.get(env)
+        if p and os.path.exists(p):
+            return p
+    # Try certifi if the user installed it
+    try:
+        import certifi
+        return certifi.where()
+    except ImportError:
+        pass
+    # Common macOS / Homebrew / Linux locations
+    candidates = [
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/opt/homebrew/etc/ca-certificates/cert.pem",
+        "/opt/homebrew/etc/openssl@3/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+        "/usr/local/etc/ca-certificates/cert.pem",
+        "/Library/Frameworks/Python.framework/Versions/Current/etc/openssl/cert.pem",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    # Last resort: Python's default
+    default = ssl.get_default_verify_paths().cafile
+    if default and os.path.exists(default):
+        return default
+    return None
+
+
+def _ssl_context():
+    import ssl
+    ca = _resolve_ca_bundle()
+    if ca:
+        return ssl.create_default_context(cafile=ca)
+    return ssl.create_default_context()
+
+
+def _context_for(url):
+    """Return an SSL context for https URLs, None for http."""
+    try:
+        scheme = urlparse(url).scheme.lower()
+    except Exception:
+        scheme = ""
+    if scheme == "https":
+        return _ssl_context()
+    return None
+
+
+def _is_ssl_verify_error(exc):
+    """True if exc is (or wraps) an ssl.SSLCertVerificationError."""
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    # Fallback: match by class name / message (older Pythons)
+    name = type(reason).__name__ if reason is not None else ""
+    if name == "SSLCertVerificationError":
+        return True
+    msg = str(exc)
+    if "CERTIFICATE_VERIFY_FAILED" in msg:
+        return True
+    return False
+
+
+def _print_ssl_hint():
+    log(
+        "\n[bootstrap] SSL verification failed. This usually means Python "
+        "can't find CA certificates on this machine.\n"
+        "Try one of:\n"
+        "  \u2022 pip3 install --user certifi && export SSL_CERT_FILE=\"$(python3 -m certifi)\"\n"
+        "  \u2022 On python.org Python: run /Applications/Python\\ 3.X/Install\\ Certificates.command "
+        "(substitute your version)\n"
+        "Then re-run: bin/bootstrap\n"
+    )
+
+
+def http_post_json(url, payload, timeout=15):
+    body = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    ctx = _context_for(url)
+    kwargs = {"timeout": timeout}
+    if ctx is not None:
+        kwargs["context"] = ctx
+    with request.urlopen(req, **kwargs) as resp:
+        return resp.status, json.loads(resp.read().decode("utf-8"))
+
+
+def http_get_json(url, timeout=POLL_TIMEOUT):
+    req = request.Request(url, headers={"Accept": "application/json"}, method="GET")
+    ctx = _context_for(url)
+    kwargs = {"timeout": timeout}
+    if ctx is not None:
+        kwargs["context"] = ctx
+    with request.urlopen(req, **kwargs) as resp:
+        return resp.status, json.loads(resp.read().decode("utf-8"))
+
+
+def start_pairing(auth_url, device_name):
+    url = auth_url.rstrip("/") + "/auth/pair/start"
+    try:
+        status, data = http_post_json(url, {"device_name": device_name})
+    except error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        log(f"[bootstrap] HTTP {e.code} from {url}\n{body}\n")
+        sys.exit(1)
+    except error.URLError as e:
+        log(f"[bootstrap] Could not reach {url}: {e.reason}\n")
+        if _is_ssl_verify_error(e):
+            _print_ssl_hint()
+        sys.exit(1)
+    except Exception as e:
+        log(f"[bootstrap] Failed to start pairing: {e}\n")
+        sys.exit(1)
+
+    for key in ("code", "poll_token"):
+        if key not in data:
+            log(f"[bootstrap] Bad response from server (missing {key}): {data}\n")
+            sys.exit(1)
+    return data
+
+
+def print_banner(code, auth_url):
+    # Box-drawing frame with the code centered inside.
+    width = 59
+    line = "=" * width
+    label = "Pairing code:"
+    content = f"{label}  {code}"
+    pad = max(0, (width - len(content)) // 2)
+    centered = (" " * pad) + content
+    visit_url = auth_url.rstrip("/") + "/auth/"
+
+    sys.stderr.write("\n")
+    sys.stderr.write(f"{line}\n")
+    sys.stderr.write(f"{centered}\n")
+    sys.stderr.write(f"{line}\n")
+    sys.stderr.write("\n")
+    sys.stderr.write(f"  Visit:  {visit_url}\n")
+    sys.stderr.write("  Enter the code above to approve this device.\n")
+    sys.stderr.write("\n")
+    sys.stderr.write("  Waiting for approval (expires in 10 min)...\n")
+    sys.stderr.write("  ")
+    sys.stderr.flush()
+
+
+def poll_until_resolved(auth_url, poll_token):
+    url = auth_url.rstrip("/") + f"/auth/pair/status/{poll_token}"
+    while True:
+        try:
+            status, data = http_get_json(url, timeout=POLL_TIMEOUT)
+        except error.HTTPError as e:
+            if e.code == 404:
+                log("\n[bootstrap] Pairing code expired.\n")
+                sys.exit(1)
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            log(f"\n[bootstrap] HTTP {e.code} while polling: {body}\n")
+            log("[bootstrap] Retrying...\n  ")
+            time.sleep(POLL_BACKOFF)
+            continue
+        except (error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
+            if _is_ssl_verify_error(e):
+                log(f"\n[bootstrap] SSL error while polling: {e}\n")
+                _print_ssl_hint()
+                sys.exit(1)
+            log(f"\n[bootstrap] Transient network error: {e}. Retrying...\n  ")
+            time.sleep(POLL_BACKOFF)
+            continue
+        except Exception as e:
+            log(f"\n[bootstrap] Unexpected error while polling: {e}. Retrying...\n  ")
+            time.sleep(POLL_BACKOFF)
+            continue
+
+        state = data.get("status")
+        if state == "pending":
+            log(".")
+            continue
+        if state == "approved":
+            log("\n")
+            return data
+        if state == "rejected":
+            log("\n[bootstrap] Pairing rejected.\n")
+            sys.exit(1)
+        if state == "expired":
+            log("\n[bootstrap] Pairing code expired.\n")
+            sys.exit(1)
+
+        log(f"\n[bootstrap] Unknown status from server: {data}. Retrying...\n  ")
+        time.sleep(POLL_BACKOFF)
+
+
+def write_config(config_path, device_name, server_addr, server_port, token):
+    config_path = Path(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if config_path.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = config_path.with_suffix(config_path.suffix + f".bak.{stamp}")
+        # If the suffix is empty, the above still produces something sensible.
+        backup = Path(str(config_path) + f".bak.{stamp}")
+        config_path.rename(backup)
+        log(f"[bootstrap] Backed up existing config to {backup}\n")
+
+    iso = datetime.now().astimezone().isoformat(timespec="seconds")
+    # Basic escaping of quotes/backslashes for TOML string values.
+    def toml_str(s):
+        return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+    content = (
+        f"# Generated by bin/bootstrap — device: {toml_str(device_name)}, paired at {iso}\n"
+        f'serverAddr = "{toml_str(server_addr)}"\n'
+        f"serverPort = {int(server_port)}\n"
+        "\n"
+        "# Intentionally empty; real auth is per-device via [metadatas] below.\n"
+        'auth.method = "token"\n'
+        'auth.token = ""\n'
+        "\n"
+        "# Revocation is re-checked on every heartbeat; frp disables them by\n"
+        "# default under tcpMux, so turn them on explicitly.\n"
+        "transport.heartbeatInterval = 30\n"
+        "transport.heartbeatTimeout = 90\n"
+        "\n"
+        "[metadatas]\n"
+        f'device_token = "{toml_str(token)}"\n'
+    )
+    config_path.write_text(content)
+
+
+def write_domain_config(porch_path, domain):
+    """Write config/porch.toml from the server's `domain` block, so this
+    machine's launchers print the right URLs. Never overwrites an existing
+    file, and only writes values porch_config accepts."""
+    porch_path = Path(porch_path)
+    if porch_config is None or not isinstance(domain, dict) or porch_path.exists():
+        return
+    keys = ("root", "tunnel_base", "auth_host", "panel_host", "landing_host", "cookie_domain")
+    lines = ["# Written by bin/bootstrap from the pairing server. See porch.toml.example.",
+             "[domain]"]
+    for k in keys:
+        v = domain.get(k)
+        if isinstance(v, str) and v:
+            lines.append(f'{k} = {json.dumps(v)}')
+    text = "\n".join(lines) + "\n"
+    tmp = porch_path.with_name(porch_path.name + ".tmp")
+    try:
+        porch_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text)
+        porch_config.load(path=str(tmp), env={})
+        tmp.rename(porch_path)
+        log(f"[bootstrap] Domain config written to {porch_path}\n")
+    except (OSError, porch_config.ConfigError) as e:
+        log(f"[bootstrap] Not writing {porch_path}: {e}\n")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def main():
+    repo_root = Path(__file__).resolve().parent.parent
+    default_config = repo_root / "config" / "frpc.toml"
+    default_name = socket.gethostname() or "device"
+
+    parser = argparse.ArgumentParser(
+        description="Pair this machine with a cush-tools auth server and write config/frpc.toml."
+    )
+    parser.add_argument("--auth-url", default=DEFAULT_AUTH_URL,
+                        help="Base URL of your Porch server's landing page, e.g. "
+                             "https://tunnel.example.com (default: from config/porch.toml"
+                             + (f", {DEFAULT_AUTH_URL}" if DEFAULT_AUTH_URL else ", none here") + ")")
+    parser.add_argument("--name", default=default_name,
+                        help=f"Device name (default: {default_name})")
+    parser.add_argument("--config", default=str(default_config),
+                        help=f"Path to frpc.toml to write (default: {default_config})")
+    parser.add_argument("--non-interactive", action="store_true",
+                        help="Do not prompt; use defaults for all inputs.")
+    try:
+        args = parser.parse_args()
+    except SystemExit as e:
+        # argparse exits 2 on bad args, 0 on --help; preserve that.
+        raise
+    if not args.auth_url:
+        parser.error("no Porch server configured on this machine: pass --auth-url "
+                     "https://<your Porch landing host> (or run install.sh from your "
+                     "Porch server's landing page, which does this for you)")
+
+    device_name = args.name
+    if not args.non_interactive:
+        try:
+            entered = input(f"Device name [{device_name}]: ").strip()
+        except EOFError:
+            entered = ""
+        except KeyboardInterrupt:
+            log("\n[bootstrap] Cancelled.\n")
+            sys.exit(130)
+        if entered:
+            device_name = entered
+
+    if not device_name:
+        log("[bootstrap] Device name cannot be empty.\n")
+        sys.exit(2)
+
+    log(f"[bootstrap] Requesting pairing for device '{device_name}' at {args.auth_url}\n")
+    pair = start_pairing(args.auth_url, device_name)
+
+    print_banner(pair["code"], args.auth_url)
+
+    try:
+        approval = poll_until_resolved(args.auth_url, pair["poll_token"])
+    except KeyboardInterrupt:
+        log("\n[bootstrap] Cancelled.\n")
+        sys.exit(130)
+
+    for key in ("token", "server_addr", "server_port"):
+        if key not in approval:
+            log(f"[bootstrap] Approval response missing '{key}': {approval}\n")
+            sys.exit(1)
+
+    write_config(
+        args.config,
+        device_name,
+        approval["server_addr"],
+        approval["server_port"],
+        approval["token"],
+    )
+    if Path(args.config).resolve() == default_config.resolve():
+        write_domain_config(repo_root / "config" / "porch.toml", approval.get("domain"))
+
+    sys.stderr.write(f'\n\u2713 Paired as "{device_name}"\n')
+    sys.stderr.write(f"  Config written to: {args.config}\n\n")
+    sys.stderr.write("  Try it:\n")
+    sys.stderr.write("    bin/tunnel 3000 myapp\n")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.stderr.write("\n[bootstrap] Cancelled.\n")
+        sys.exit(130)

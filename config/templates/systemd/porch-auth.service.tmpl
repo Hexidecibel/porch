@@ -1,0 +1,13 @@
+[Unit]
+Description=Porch device auth server (${brand})
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 ${repo_dir}/lib/authserver.py --port ${auth_port} --data ${data_dir} ${auth_maps_args}
+ExecReload=/bin/kill -HUP $$MAINPID
+Restart=always
+RestartSec=5
+WorkingDirectory=${repo_dir}
+
+[Install]
+WantedBy=default.target

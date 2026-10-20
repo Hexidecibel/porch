@@ -1,0 +1,128 @@
+#!/bin/bash
+# Capture-only webhook door: every request gets a fixed answer and is recorded
+# Usage: bin/hook <name> [--status 200] [--body TEXT] [--content-type T]
+#                 [--max-body-mb N] [door flags] [--bg]
+# Example: bin/hook stripe --bg     -> https://stripe.<tunnel_base>
+#          porch inspect stripe --follow
+#
+# There is no app: lib/doorproxy.py runs in capture mode (bin/tunnel port "-")
+# and answers every admitted request itself, recording it like --inspect
+# (lib/inspect_store.py). Door flags apply as usual (--expires, --password,
+# --guest-link, ...; --inspect-raw to record secrets unmasked). Request bodies
+# are capped at 10MB (--max-body-mb), connections at the proxy's usual cap.
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+usage() {
+  echo "Usage: hook <name> [--status 200] [--body TEXT] [--content-type T] [--max-body-mb N] [--bg]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn  --inspect-raw"
+  echo ""
+  echo "A webhook catcher: every request to https://<name>.${PORCH_TUNNEL_BASE} is answered"
+  echo "with the given status/body (default 200 \"ok\") and recorded."
+  echo "Watch it with: porch inspect <name> --follow"
+}
+
+BG_MODE=""
+STATUS="200"
+BODY=$'ok\n'
+CTYPE="text/plain; charset=utf-8"
+MAX_MB=""
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bg) BG_MODE=1 ;;
+    --status|--body|--content-type|--max-body-mb)
+      if [ $# -lt 2 ]; then echo "Error: $1 needs a value" >&2; exit 2; fi
+      case "$1" in
+        --status) STATUS="$2" ;;
+        --body) BODY="$2" ;;
+        --content-type) CTYPE="$2" ;;
+        --max-body-mb) MAX_MB="$2" ;;
+      esac
+      shift ;;
+    --status=*) STATUS="${1#*=}" ;;
+    --body=*) BODY="${1#*=}" ;;
+    --content-type=*) CTYPE="${1#*=}" ;;
+    --max-body-mb=*) MAX_MB="${1#*=}" ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "Error: unknown option $1" >&2; usage >&2; exit 2 ;;
+    *) POS+=("$1") ;;
+  esac
+  shift
+done
+
+NAME="${POS[0]:-}"
+if [ -z "$NAME" ] || [ "${#POS[@]}" -gt 1 ]; then
+  usage
+  exit 1
+fi
+tunnel_require_valid_name "$NAME"
+
+case "$STATUS" in
+  [2-5][0-9][0-9]) ;;
+  *) echo "Error: --status must be 200-599 (got: $STATUS)" >&2; exit 2 ;;
+esac
+case "$CTYPE" in
+  */*) ;;
+  *) echo "Error: --content-type must look like type/subtype (got: $CTYPE)" >&2; exit 2 ;;
+esac
+if [ -n "$MAX_MB" ]; then
+  case "$MAX_MB" in
+    ""|*[!0-9]*) echo "Error: --max-body-mb must be a whole number 1-1024" >&2; exit 2 ;;
+  esac
+  if [ "$MAX_MB" -lt 1 ] || [ "$MAX_MB" -gt 1024 ]; then
+    echo "Error: --max-body-mb must be a whole number 1-1024" >&2
+    exit 2
+  fi
+fi
+if [ "${#BODY}" -gt 65536 ]; then
+  echo "Error: --body is limited to 64KB" >&2
+  exit 2
+fi
+
+# Every hook is inspected (that is the point); --inspect-raw stays opt-in. In
+# the --bg re-exec the spec (with the inspector) arrives through env instead.
+if [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+  case " ${DOOR_FLAG_ARGS[*]} " in
+    *" --inspect "*|*" --inspect-raw "*) ;;
+    *) DOOR_FLAG_ARGS+=(--inspect) ;;
+  esac
+fi
+
+door_spec_build "$BG_MODE" || exit 2
+
+FWD=(--status "$STATUS" --body "$BODY" --content-type "$CTYPE")
+[ -n "$MAX_MB" ] && FWD+=(--max-body-mb "$MAX_MB")
+
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+  LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+  cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" "${FWD[@]}" && {
+    echo "Webhook: https://${NAME}.${PORCH_TUNNEL_BASE}/  (answers $STATUS)"
+    door_print_summary "$NAME"
+    echo "Log: $LOG_FILE"
+    exit 0
+  }
+  exit 1
+fi
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+}
+trap cleanup EXIT INT TERM
+
+tunnel_state_register "$NAME" "hook" $$ 0
+STATE_FILE="${TUNNEL_STATE_DIR}/${NAME}.json"
+printf '%s' "$BODY" | python3 "$TUNNEL_DIR/lib/door_state.py" set-capture "$STATE_FILE" \
+    "$STATUS" "$CTYPE" ${MAX_MB:+"$MAX_MB"} || exit 2
+tunnel_state_watchdog "$NAME" &
+
+echo "Webhook: https://${NAME}.${PORCH_TUNNEL_BASE}/  (answers $STATUS, no app behind it)"
+echo ""
+door_print_summary "$NAME"
+
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" - "$NAME"

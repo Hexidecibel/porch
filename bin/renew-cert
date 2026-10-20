@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# renew-cert — Renew wildcard cert for *.tunnel.cush.rocks
+# Uses certbot with DNS-01 challenge via name.com API hooks,
+# then combines into HAProxy PEM and reloads HAProxy.
+
+CERT_NAME="tunnel.cush.rocks"
+CERT_DIR="/etc/letsencrypt/live/${CERT_NAME}"
+PEM_DIR="/etc/ssl/ssl-certs/cush.rocks"
+PEM_FILE="${PEM_DIR}/${CERT_NAME}.pem"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "=== Renewing wildcard cert for *.${CERT_NAME} ==="
+echo "Started: $(date)"
+
+# ── Run certbot ──────────────────────────────────────────────────────
+sudo certbot certonly --manual --preferred-challenges dns \
+  -d "*.${CERT_NAME}" \
+  --manual-auth-hook "${HOOK_DIR}/certbot-auth-hook" \
+  --manual-cleanup-hook "${HOOK_DIR}/certbot-cleanup-hook" \
+  --agree-tos --no-eff-email --non-interactive --force-renewal
+
+echo "Certbot completed successfully"
+
+# ── Combine into HAProxy PEM ─────────────────────────────────────────
+echo "Combining fullchain + privkey into HAProxy PEM at ${PEM_FILE}"
+# Paths as arguments, quoted inside the root shell; umask 077 keeps the
+# private key out of an unprivileged reader's hands from the moment it exists.
+sudo sh -c 'umask 077; cat "$1/fullchain.pem" "$1/privkey.pem" > "$2"' _ \
+  "${CERT_DIR}" "${PEM_FILE}"
+sudo chmod 600 "${PEM_FILE}"
+
+# ── Reload HAProxy ───────────────────────────────────────────────────
+echo "Reloading HAProxy..."
+sudo systemctl reload haproxy
+
+echo "=== Renewal complete ==="
+echo "Finished: $(date)"

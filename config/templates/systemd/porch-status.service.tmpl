@@ -1,0 +1,13 @@
+[Unit]
+Description=Porch tunnel status API and console (${brand})
+After=network-online.target
+
+[Service]
+ExecStartPre=/bin/mkdir -p /tmp/tunnel-state
+ExecStart=/usr/bin/python3 ${repo_dir}/lib/statusserver.py --port ${status_port} --state-dir /tmp/tunnel-state --devices ${data_dir}/devices.json --history ${data_dir}/history.jsonl
+Restart=always
+RestartSec=5
+WorkingDirectory=${repo_dir}
+
+[Install]
+WantedBy=default.target

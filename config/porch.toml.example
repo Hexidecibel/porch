@@ -1,0 +1,61 @@
+# Porch domain config. Copy to config/porch.toml (gitignored) and edit.
+# Every key is optional: unset host keys derive from domain.root, and with no
+# file at all the built-in defaults are the cush.rocks values.
+# Check it with:  python3 lib/porch_config.py check
+# PORCH_* environment variables override any key (PORCH_DOMAIN for root,
+# PORCH_TUNNEL_BASE, PORCH_AUTH_HOST, ...; PORCH_CONFIG=<path> picks the file).
+
+[brand]
+name = "Porch"
+
+[domain]
+# Bare hostnames only: no scheme, port, path, wildcard or trailing dot.
+root = "cush.rocks"
+# Apps are served at <name>.<tunnel_base>; needs a *.<tunnel_base> DNS record
+# and wildcard certificate. Default: tunnel.<root>
+tunnel_base = "tunnel.cush.rocks"
+# The device-auth server (login, enrolment, /__porch/ handoff). Default: auth.<root>
+auth_host = "auth.cush.rocks"
+# The tunnel admin console. Default: panel.<root>
+panel_host = "panel.cush.rocks"
+# The landing page, install.sh and the pairing URL bin/bootstrap uses.
+# Default: <tunnel_base>
+landing_host = "tunnel.cush.rocks"
+# Domain of the cross-app cush_auth cookie; every host above must be under it.
+# Default: .<root>
+cookie_domain = ".cush.rocks"
+
+[server]
+# Where paired machines' frpc connects. Default: <tunnel_base>, port 7000.
+frp_addr = "tunnel.cush.rocks"
+frp_port = 7000
+
+[auth]
+# Gated apps behind HAProxy forward-auth: hostnames one label under root.
+# For a root other than cush.rocks these default to empty and default_rd to
+# https://<landing_host>/.
+default_rd = "https://grab.cush.rocks/"
+protected_apps = ["grab.cush.rocks"]
+known_apps = [
+  "grab.cush.rocks", "issues.cush.rocks", "autodj.cush.rocks",
+  "sentinel.cush.rocks", "dash.cush.rocks", "up.cush.rocks",
+  "gallery.cush.rocks", "invoicer.cush.rocks", "ma.cush.rocks",
+  "trendlab.cush.rocks", "hexitech.cush.rocks", "velo.cush.rocks",
+]
+
+# [install]
+# "fresh" (default): porch setup built this box. "adopt": an existing install
+# porch only verifies (`porch setup --adopt`); its render profile keeps the
+# legacy layout and localhost_bypass below defaults to true.
+# mode = "fresh"
+
+# [adopt]
+# Only for an install porch did not set up itself (an existing box).
+# localhost_bypass = true keeps the old rule that any frpc logging in from
+# 127.0.0.1 is trusted without a device token. Leave it off (the default):
+# the home frpc then authenticates with data/.home-frpc-token, which is what
+# makes relay connection modes safe. PORCH_LOCALHOST_BYPASS=1/0 overrides it.
+# localhost_bypass = false     (default: true when install.mode = "adopt")
+# Accepted differences in `porch render haproxy --against <live cfg>`, one
+# "<section>: <directive prefix>" per entry, e.g.
+# allow = ["frontend www-https: bind :443 ssl crt /etc/ssl/other.pem"]

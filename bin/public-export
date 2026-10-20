@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""bin/public-export: build the public Porch repo as one fresh commit.
+
+Usage: bin/public-export [--out DIR] [--author-name N] [--author-email E]
+                         [--allow PATH[:RULE]]... [--markers FILE] [--force]
+
+Takes the committed tree at HEAD (`git archive HEAD`, so nothing uncommitted
+and nothing untracked), drops the paths in share/public-exclude.txt, runs a
+leak scan over what is left, and only if it is clean writes DIR as a new git
+repo with ONE commit, "Porch: initial public release". The private repo and
+its history are never touched. Nothing is pushed.
+
+  --out DIR         default ~/.local/share/porch/public-export/porch
+  --author-name N   default: your GitHub login (gh), else git config user.name
+  --author-email E  default: your GitHub noreply address (needs `gh` signed in)
+  --allow PATH[:RULE]  skip a known-fake hit (all rules for PATH, or one rule)
+  --markers FILE    personal markers to refuse (default: the private
+                    share/public-export-markers.txt at HEAD, never exported)
+  --force           replace a non-empty DIR
+
+Exit: 0 ok, 1 leak scan refused (file:line listed, never the secret), 2 usage.
+"""
+
+import argparse
+import fnmatch
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_OUT = os.path.join(os.path.expanduser('~'), '.local', 'share', 'porch', 'public-export', 'porch')
+EXCLUDE_FILE = 'share/public-exclude.txt'
+MESSAGE = 'Porch: initial public release'
+
+# ---- leak scan rules -----------------------------------------------------------
+# Personal markers (your home IP, user name, mail provider, host names, ...)
+# are not listed here, since this script is itself exported: they live in a
+# private file, one literal per line (case-insensitive, "#" comments), which
+# share/public-exclude.txt keeps out of the export. Read from HEAD of the
+# source repo, or from --markers FILE.
+MARKERS_FILE = 'share/public-export-markers.txt'
+
+# (rule name, compiled regex, path globs the rule does NOT apply to).
+# Add a rule here to extend the scan. Hits print as file:line + a 4-char hint.
+RULES = [
+    ('private key block', re.compile(r'-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----'), ['tests/fixtures/*']),
+    ('GitHub token', re.compile(r'(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}'), ['tests/*']),
+    ('1Password service token', re.compile(r'(?<![A-Za-z0-9_])ops_[A-Za-z0-9_\-]{20,}'), ['tests/*']),
+    ('AWS access key', re.compile(r'(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])'), ['tests/*']),
+    ('Stripe live key', re.compile(r'(?<![A-Za-z0-9_])[sr]k_live_[A-Za-z0-9]{8,}'), ['tests/*']),
+]
+
+# Files that must never be exported, whatever their content.
+FORBIDDEN = [
+    ('data/devices.json', 'device registry'),
+    ('config/*.toml', 'live config (only *.example and templates are public)'),
+    ('.env', 'env file'), ('*/.env', 'env file'),
+    ('.env.*', 'env file'), ('*/.env.*', 'env file'),
+]
+FORBIDDEN_OK = ['.env.example', '*/.env.example']
+
+# Known-fake hits: (path, rule prefix or None = every rule). Keep a comment on each.
+DEFAULT_ALLOW = [
+    # migrate's self-test: a placeholder OpenSSH key header with "..." as the body
+    ('lib/migrate.py', 'private key block'),
+    # secure-entry's ssh field placeholder text (no key material)
+    ('lib/secureentry.py', 'private key block'),
+    # MCP refusal tests: fake key headers with an "abc" body
+    ('tests/test_porch_mcp.py', 'private key block'),
+]
+
+
+def die(msg, code=2):
+    print(f'public-export: {msg}', file=sys.stderr)
+    sys.exit(code)
+
+
+def git(*args, cwd=REPO, check=True, env=None):
+    return subprocess.run(['git', *args], cwd=cwd, check=check, capture_output=True, env=env)
+
+
+def excluded(rel, excludes):
+    for e in excludes:
+        if e.endswith('/'):
+            if rel.startswith(e):
+                return True
+        elif rel == e or fnmatch.fnmatchcase(rel, e):
+            return True
+    return False
+
+
+def export_tree(repo, dest):
+    """git archive HEAD into dest, minus the exclude list. Returns the file list."""
+    blob = git('archive', '--format=tar', 'HEAD', cwd=repo).stdout
+    with tarfile.open(fileobj=io.BytesIO(blob)) as tf:
+        members = tf.getmembers()
+        excl_member = next((m for m in members if m.name == EXCLUDE_FILE), None)
+        excludes = []
+        if excl_member is not None:
+            for line in tf.extractfile(excl_member).read().decode('utf-8').splitlines():
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    excludes.append(line.lstrip('/'))
+        keep = []
+        for m in members:
+            name = m.name.removeprefix('./')
+            if name.startswith('/') or '..' in name.split('/'):
+                die(f'refusing odd archive member {m.name!r}')
+            if excluded(name, excludes) or (m.isdir() and excluded(name + '/', excludes)):
+                continue
+            if not (m.isfile() or m.isdir() or m.issym()):
+                continue
+            keep.append(m)
+        if hasattr(tarfile, 'data_filter'):
+            tf.extractall(dest, members=keep, filter='data')
+        else:
+            tf.extractall(dest, members=keep)
+    files = sorted(m.name for m in keep if not m.isdir())
+    return files, excludes
+
+
+def read_markers(repo, path=None):
+    """Personal markers: --markers FILE, else MARKERS_FILE at HEAD. None = not configured."""
+    if path:
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+    else:
+        r = git('show', f'HEAD:{MARKERS_FILE}', cwd=repo, check=False)
+        if r.returncode != 0:
+            return None
+        text = r.stdout.decode('utf-8')
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            out.append(line)
+    return out
+
+
+def marker_rules(markers):
+    return [(f'personal marker #{i}', re.compile(re.escape(m), re.I), []) for i, m in enumerate(markers, 1)]
+
+
+def allowed(rel, rule, allows):
+    for path, r in allows:
+        if (rel == path or fnmatch.fnmatchcase(rel, path)) and (r is None or rule.startswith(r)):
+            return True
+    return False
+
+
+def hint(s):
+    return (s[:4] + '…') if len(s) > 4 else s
+
+
+def scan(root, files, allows, rules=None):
+    rules = RULES if rules is None else rules
+    hits = []
+    for rel in files:
+        for pat, why in FORBIDDEN:
+            if fnmatch.fnmatchcase(rel, pat) and not any(fnmatch.fnmatchcase(rel, ok) for ok in FORBIDDEN_OK):
+                if not allowed(rel, 'forbidden file', allows):
+                    hits.append((rel, 0, f'forbidden file ({why})', ''))
+                break
+        path = os.path.join(root, rel)
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        with open(path, 'rb') as f:
+            data = f.read()
+        if b'\0' in data[:8192]:
+            continue
+        text = data.decode('utf-8', errors='replace')
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for name, rx, skip in rules:
+                if any(fnmatch.fnmatchcase(rel, g) for g in skip):
+                    continue
+                m = rx.search(line)
+                if m and not allowed(rel, name, allows):
+                    hits.append((rel, lineno, name, hint(m.group(0))))
+    return hits
+
+
+def gitleaks(root, files, allows):
+    exe = shutil.which('gitleaks')
+    if not exe:
+        return None
+    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as rep:
+        report = rep.name
+    try:
+        r = subprocess.run([exe, 'detect', '--no-git', '--no-banner', '--source', root,
+                            '--report-format', 'json', '--report-path', report, '--redact'],
+                           capture_output=True, text=True)
+        try:
+            with open(report) as f:
+                found = json.load(f) or []
+        except (OSError, ValueError):
+            found = []
+        if r.returncode not in (0, 1):
+            die(f'gitleaks failed: {r.stderr.strip()[:300]}', 1)
+    finally:
+        os.unlink(report)
+    hits = []
+    for x in found:
+        rel = os.path.relpath(os.path.join(root, x.get('File', '')), root) \
+            if not os.path.isabs(x.get('File', '')) else os.path.relpath(x['File'], root)
+        rule = f"gitleaks {x.get('RuleID', '?')}"
+        if rel.startswith('tests/') or allowed(rel, rule, allows) or allowed(rel, 'gitleaks', allows):
+            continue
+        hits.append((rel, x.get('StartLine', 0), rule, ''))
+    return hits
+
+
+def gh_identity():
+    if not shutil.which('gh'):
+        return None, None
+    try:
+        r = subprocess.run(['gh', 'api', 'user', '--jq',
+                            '[.login, "\\(.id)+\\(.login)@users.noreply.github.com"] | @tsv'],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    if r.returncode != 0 or '\t' not in r.stdout:
+        return None, None
+    name, email = r.stdout.strip().split('\t', 1)
+    return name or None, email or None
+
+
+def safe_to_clear(path, repo):
+    path = os.path.realpath(path)
+    home = os.path.realpath(os.path.expanduser('~'))
+    repo = os.path.realpath(repo)
+    if path in ('/', home) or path == repo or repo.startswith(path + os.sep):
+        return False
+    return True
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog='bin/public-export',
+                                description='Build the public repo as one fresh commit.')
+    p.add_argument('--out', default=DEFAULT_OUT)
+    p.add_argument('--author-name')
+    p.add_argument('--author-email')
+    p.add_argument('--allow', action='append', default=[], metavar='PATH[:RULE]')
+    p.add_argument('--force', action='store_true')
+    p.add_argument('--markers', metavar='FILE', help=f'personal markers (default: {MARKERS_FILE} at HEAD)')
+    p.add_argument('--repo', default=REPO, help=argparse.SUPPRESS)
+    p.add_argument('--no-gh', action='store_true', help=argparse.SUPPRESS)   # tests
+    args = p.parse_args(argv)
+
+    repo = os.path.realpath(args.repo)
+    if git('rev-parse', '--verify', 'HEAD', cwd=repo, check=False).returncode != 0:
+        die(f'{repo} is not a git repo with a HEAD commit')
+    out = os.path.abspath(os.path.expanduser(args.out))
+    if os.path.realpath(out) == repo or os.path.realpath(out).startswith(repo + os.sep):
+        die('--out must be outside the source repo')
+    if os.path.exists(out) and (not os.path.isdir(out) or os.listdir(out)):
+        if not args.force:
+            die(f'{out} exists and is not empty (use --force to replace it)')
+        if not safe_to_clear(out, repo):
+            die(f'refusing to clear {out}')
+
+    name, email = args.author_name, args.author_email
+    if not (name and email) and not args.no_gh:
+        gname, gemail = gh_identity()
+        name, email = name or gname, email or gemail
+    if not name:
+        r = git('config', 'user.name', cwd=repo, check=False)
+        name = r.stdout.decode().strip() or None
+    if not email:
+        die('no author email: sign in with `gh auth login` or pass --author-email')
+    if not name:
+        die('no author name: pass --author-name')
+
+    markers = read_markers(repo, args.markers)
+    if markers is None:
+        print(f'public-export: warning: no {MARKERS_FILE} at HEAD and no --markers: '
+              'personal markers are not checked', file=sys.stderr)
+        markers = []
+    rules = marker_rules(markers) + RULES
+
+    allows = list(DEFAULT_ALLOW)
+    for a in args.allow:
+        path, _, rule = a.partition(':')
+        allows.append((path, rule or None))
+
+    parent = os.path.dirname(out)
+    os.makedirs(parent, exist_ok=True)
+    stage = tempfile.mkdtemp(prefix='.public-export-', dir=parent)
+    try:
+        files, excludes = export_tree(repo, stage)
+        hits = scan(stage, files, allows, rules)
+        gl = gitleaks(stage, files, allows)
+        if gl:
+            hits += gl
+        if hits:
+            print(f'public-export: leak scan refused the export ({len(hits)} hit(s)); nothing written:',
+                  file=sys.stderr)
+            for rel, line, rule, h in hits:
+                loc = f'{rel}:{line}' if line else rel
+                print(f'  {loc}: {rule}' + (f' [{h}]' if h else ''),
+                      file=sys.stderr)
+            print('  (a known-fake test value: --allow PATH[:RULE], or add it to DEFAULT_ALLOW)',
+                  file=sys.stderr)
+            return 1
+        env = dict(os.environ, GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email,
+                   GIT_COMMITTER_NAME=name, GIT_COMMITTER_EMAIL=email)
+        for k in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
+            env.pop(k, None)
+        git('init', '-q', '-b', 'main', cwd=stage, env=env)
+        git('add', '-A', cwd=stage, env=env)
+        r = git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', MESSAGE, cwd=stage, env=env, check=False)
+        if r.returncode != 0:
+            die('git commit failed: ' + (r.stderr or r.stdout).decode(errors='replace').strip()[:500], 1)
+        if os.path.exists(out):
+            shutil.rmtree(out)
+        os.rename(stage, out)
+        stage = None
+    finally:
+        if stage and os.path.exists(stage):
+            shutil.rmtree(stage)
+
+    count = len(git('ls-files', cwd=out).stdout.decode().splitlines())
+    commits = git('rev-list', '--count', 'HEAD', cwd=out).stdout.decode().strip()
+    head = git('log', '-1', '--format=%h %an <%ae>', cwd=out).stdout.decode().strip()
+    print(f'Exported {count} files to {out}')
+    print(f'Commits: {commits} ({head})')
+    print(f'Excluded: {", ".join(excludes) if excludes else "(none)"}')
+    print(f'Personal markers checked: {len(markers)}')
+    print(f'gitleaks: {"clean" if gl is not None else "not installed, skipped"}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

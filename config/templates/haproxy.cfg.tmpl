@@ -1,0 +1,172 @@
+# Porch HAProxy template (lib/porch_setup/render.py). Fragments are composed
+# in Python by profile/options; inside one, ${name} is substituted from the
+# config and $$ is a literal dollar sign. Lines starting "##" are dropped.
+## @fragment global
+global
+	log /dev/log	local0
+	log /dev/log	local1 notice
+	chroot /var/lib/haproxy
+	stats socket /run/haproxy/admin.sock mode 660 level admin
+	stats timeout 30s
+	user haproxy
+	group haproxy
+	daemon
+
+	ca-base /etc/ssl/certs
+	crt-base /etc/ssl/private
+
+	ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384
+	ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+	ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+
+## @fragment defaults
+defaults
+	log	global
+	mode	http
+	option	httplog
+	option	dontlognull
+
+	timeout connect 5s
+	timeout client  2m
+	timeout server  2m
+	timeout http-request 2m
+
+	# Porch's own pages (lib/porch_errors.py; bin/haproxy-errors installs them,
+	# so does the setup haproxy step).
+	errorfile 400 ${errors_dir}/400.http
+	errorfile 403 ${errors_dir}/403.http
+	errorfile 408 ${errors_dir}/408.http
+	errorfile 429 ${errors_dir}/429.http
+	errorfile 500 ${errors_dir}/500.http
+	errorfile 502 ${errors_dir}/502.http
+	errorfile 503 ${errors_dir}/503.http
+	errorfile 504 ${errors_dir}/504.http
+
+## @fragment frontend_head
+# ---------- HTTPS FRONTEND ----------
+frontend www-https
+	timeout client 5m
+	bind *:80
+	bind *:443 ssl crt ${cert_path}
+## @fragment relay_binds
+	# Relay ingress: the home relay frpc (porch-relay) forwards the relay's
+	# 80/443 here with a PROXY v2 header, so %[src] (and X-Forwarded-For) is
+	# the real client, not 127.0.0.1. Loopback only: nothing else can forge it.
+	bind 127.0.0.1:${relay_http_port} accept-proxy
+	bind 127.0.0.1:${relay_https_port} ssl crt ${cert_path} accept-proxy
+## @fragment frontend_headers
+	http-request redirect scheme https unless { ssl_fc }
+
+	http-request set-header X-Forwarded-Proto https if { ssl_fc }
+	http-request set-header X-Forwarded-Proto http  if !{ ssl_fc }
+	http-request set-header X-Forwarded-Port 443 if { ssl_fc }
+	http-request set-header X-Forwarded-For %[src]
+	http-request set-header X-Forwarded-Host %[req.hdr(host)]
+
+	# Identity headers are set only by the gate below: strip client-sent ones.
+	http-request del-header X-Cush- -m beg
+
+	http-response set-header Strict-Transport-Security "${hsts}"
+	http-response set-header X-Content-Type-Options nosniff
+	http-response set-header X-Frame-Options SAMEORIGIN
+	http-response set-header Referrer-Policy strict-origin-when-cross-origin
+
+	stick-table type ip size 100k expire 30s store http_req_rate(10s)
+	http-request track-sc0 src
+	http-request deny deny_status 429 if { sc_http_req_rate(0) gt 500 }
+
+	acl letsencrypt-acl path_beg /.well-known/acme-challenge/
+## @fragment acls_apex
+	acl cushroot hdr(host) -i ${root}
+	acl cushroot hdr(host) -i www.${root}
+## @fragment acls_core
+	acl panel hdr(host) -i ${panel_host}
+	acl tunnelroot hdr(host) -i ${landing_host}
+	acl tunnel hdr_end(host) -i .${tunnel_base}
+	acl host_auth hdr(host) -i ${auth_host}
+	acl porch_path path_beg /__porch/
+## @fragment gate_acls
+	acl cush_authed var(txn.cush_tok),concat(':',txn.cush_host,''),map_str(${maps_dir}/cush-grants.map) -m found
+	acl cush_authed var(txn.cush_tok),concat(':*'),map_str(${maps_dir}/cush-grants.map) -m found
+	acl needs_auth hdr(host),lower,map_str(${maps_dir}/cush-protected.map) -m found
+	# Public paths on gated hosts (auth server: cush-public.map holds prefixes,
+	# matched with map_beg; cush-public-exact.map exact paths, map_str). A
+	# path with a dot-dot, double slash, encoded dot/slash/backslash, backslash
+	# or ";" is never public: it falls back to the gate.
+	acl public_path var(txn.cush_hp),map_beg(${maps_dir}/cush-public.map) -m found
+	acl public_path var(txn.cush_hp),map_str(${maps_dir}/cush-public-exact.map) -m found
+	acl odd_path path_sub -i .. // %2e %2f %5c ; '\'
+	acl public_ok var(txn.cush_public) -m bool
+## @fragment routing_auth
+	use_backend letsencrypt-backend if letsencrypt-acl
+	use_backend cush_auth if host_auth
+	use_backend cush_auth if porch_path
+## @fragment gate
+	# Domain-wide cush_auth edge gate (adopted installs only).
+	http-request set-var(txn.cush_tok) req.cook(cush_auth),sha2(256),hex,lower
+	http-request set-var(txn.cush_host) hdr(host),lower
+	http-request set-var(txn.cush_path) path
+	http-request set-var(txn.cush_hp) var(txn.cush_host),concat(,txn.cush_path,)
+	http-request set-var(txn.cush_public) bool(1) if public_path !odd_path
+	http-request set-var(txn.cush_id) var(txn.cush_tok),map_str(${maps_dir}/cush-identity.map) if { var(txn.cush_tok) -m found }
+	http-request set-header X-Cush-Device %[var(txn.cush_id),field(1,'|')] if { var(txn.cush_id) -m found } !tunnel !public_ok
+	http-request set-header X-Cush-Role %[var(txn.cush_id),field(2,'|')] if { var(txn.cush_id) -m found } !tunnel !public_ok
+	http-request set-header X-Cush-Device-Name %[var(txn.cush_id),field(3,'|')] if { var(txn.cush_id) -m found } !tunnel !public_ok
+	http-request redirect code 302 location https://${auth_host}/login?rd=https%%3A%%2F%%2F%[hdr(host)]%[path] if needs_auth !cush_authed !host_auth !letsencrypt-acl !porch_path !public_ok
+## @fragment cookie_strip
+	# Never forward the raw cush_auth token, except to the hosts that hash it
+	# themselves (auth, panel, landing; tunnel apps get it via frps).
+	http-request set-header Cookie "%[req.fhdr(cookie,1)]; %[req.fhdr(cookie,2)]" if { req.fhdr_cnt(cookie) eq 2 } !host_auth !panel !tunnelroot
+	http-request set-header Cookie "%[req.fhdr(cookie,1)]; %[req.fhdr(cookie,2)]; %[req.fhdr(cookie,3)]" if { req.fhdr_cnt(cookie) eq 3 } !host_auth !panel !tunnelroot
+	http-request replace-header Cookie '^(.*;[ \t]*|[ \t]*)cush_auth=[^;]*;[ \t]*(.*)$$' '\1\2' unless host_auth || panel || tunnelroot
+	http-request replace-header Cookie '^(.*;[ \t]*|[ \t]*)cush_auth=[^;]*;[ \t]*(.*)$$' '\1\2' unless host_auth || panel || tunnelroot
+	http-request replace-header Cookie '^(.*);[ \t]*cush_auth=[^;]*$$' '\1' unless host_auth || panel || tunnelroot
+	http-request replace-header Cookie '^[ \t]*cush_auth=[^;]*()$$' '\1' unless host_auth || panel || tunnelroot
+	http-request del-header Cookie if { req.fhdr_cnt(cookie) eq 1 } { req.fhdr(cookie) -m len 0 } !host_auth !panel !tunnelroot
+## @fragment routing_apex
+	acl cushroot_shortener path_beg /l/
+	use_backend shortener if cushroot cushroot_shortener
+	use_backend cushroot if cushroot
+## @fragment routing_landing_static
+	# No nginx: the landing host's /auth/, /api/ and /l/ go straight to the
+	# auth server, the status API and the shortener.
+	acl landing_auth path_beg /auth/
+	acl landing_api path_beg /api/
+	acl landing_short path_beg /l/
+	use_backend cush_auth if tunnelroot landing_auth
+	use_backend panel if tunnelroot landing_api
+	use_backend shortener if tunnelroot landing_short
+## @fragment routing
+	use_backend panel if panel
+	use_backend tunnelroot if tunnelroot
+	use_backend tunnel if tunnel
+## @fragment frontend_tail
+	default_backend reject
+
+## @fragment backends
+# ---------- BACKENDS ----------
+backend reject
+	http-request deny deny_status 403
+
+backend letsencrypt-backend
+	server letsencrypt 127.0.0.1:${acme_http_port}
+
+backend shortener
+	http-request replace-path /l(.*) \1
+	server shortener 127.0.0.1:${shortener_port}
+
+backend tunnel
+	server frp_http 127.0.0.1:${frp_vhost_port}
+
+backend panel
+	server panel 127.0.0.1:${status_port} check
+
+backend tunnelroot
+	server tunnelroot 127.0.0.1:${landing_port}
+
+backend cush_auth
+	server cush_auth 127.0.0.1:${auth_port}
+## @fragment backends_apex
+
+backend cushroot
+	server cushroot 127.0.0.1:${apex_port}

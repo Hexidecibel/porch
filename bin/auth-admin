@@ -1,0 +1,1008 @@
+#!/usr/bin/env python3
+
+"""CLI for managing the cush-tools device registry (data/devices.json).
+
+Every mutation goes through the running authserver (HTTP on 127.0.0.1:9512,
+authenticated with the token it writes to data/.admin-cli-token on start).
+The server keeps the registry in memory and rewrites the whole file, so a CLI
+that edited the file behind its back could have its change (a revoke!)
+silently undone; through the API that cannot happen, and the HAProxy maps are
+synced by the same code path the panel uses.
+
+Offline fallback: when the server is NOT running (it holds
+data/.authserver.lock for its whole life), `revoke`, `set-password` and
+`server` edit the file directly, holding data/.devices.lock exclusively across
+the whole read-modify-write (the same lock the server takes). `approve`,
+`role` and `rename` need the running server. The HTTP side is
+lib/auth_client.py (shared with Pocket).
+"""
+
+import argparse
+import base64
+import fcntl
+import getpass
+import hashlib
+import json
+import os
+import secrets
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, 'lib'))
+import auth_client  # noqa: E402  (the CLI-token client, shared with Pocket)
+DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, 'data')
+DEVICES_FILENAME = 'devices.json'
+
+SCRYPT_N = 2 ** 15
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_MAXMEM = 67108864
+SCRYPT_DKLEN = 32
+SCRYPT_SALT_BYTES = 16
+SESSION_SECRET_BYTES = 32
+
+DEFAULT_SERVER_ADDR = ''
+
+# CUSH_AUTH_URL overrides it (tests). Must stay a loopback URL: the server
+# ignores the CLI token on anything that looks proxied.
+AUTH_URL = os.environ.get('CUSH_AUTH_URL', 'http://127.0.0.1:9512')
+CLI_TOKEN_FILENAME = auth_client.CLI_TOKEN_FILENAME
+CLI_TOKEN_HEADER = auth_client.CLI_TOKEN_HEADER
+DEFAULT_SERVER_PORT = 7000
+DEVICES_LOCK_FILENAME = '.devices.lock'
+SERVER_LOCK_FILENAME = '.authserver.lock'
+PASSWORD_MIN = 12
+
+
+def log(msg):
+    sys.stderr.write(f"[auth-admin] {msg}\n")
+
+
+def die(msg, code=1):
+    sys.stderr.write(f"[auth-admin] error: {msg}\n")
+    sys.exit(code)
+
+
+def iso_now():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def empty_registry():
+    return {
+        "devices": [],
+        "pairings": [],
+        "admin": None,
+        "server": {"addr": DEFAULT_SERVER_ADDR, "port": DEFAULT_SERVER_PORT},
+    }
+
+
+def devices_path(data_dir):
+    return os.path.join(data_dir, DEVICES_FILENAME)
+
+
+def ensure_data_dir(data_dir):
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError as e:
+        die(f"could not create data dir {data_dir}: {e}")
+
+
+class devices_lock:
+    """flock on data/.devices.lock: the lock authserver takes around every
+    write of devices.json (shared for reads, exclusive for writes)."""
+
+    def __init__(self, data_dir, exclusive):
+        self.path = os.path.join(data_dir, DEVICES_LOCK_FILENAME)
+        self.mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        self.fd = None
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.fd, self.mode)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+        return False
+
+
+def _read_registry_unlocked(path):
+    if not os.path.exists(path):
+        return empty_registry()
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        die(f"could not read {path}: {e}")
+    if not isinstance(data, dict):
+        die(f"{path}: expected a JSON object at the top level")
+    # Normalize missing keys
+    data.setdefault("devices", [])
+    data.setdefault("pairings", [])
+    data.setdefault("admin", None)
+    data.setdefault("server", {"addr": DEFAULT_SERVER_ADDR, "port": DEFAULT_SERVER_PORT})
+    if not isinstance(data["server"], dict):
+        data["server"] = {"addr": DEFAULT_SERVER_ADDR, "port": DEFAULT_SERVER_PORT}
+    data["server"].setdefault("addr", DEFAULT_SERVER_ADDR)
+    data["server"].setdefault("port", DEFAULT_SERVER_PORT)
+    return data
+
+
+def load_registry(data_dir):
+    """Read-only snapshot under the shared lock."""
+    ensure_data_dir(data_dir)
+    with devices_lock(data_dir, exclusive=False):
+        return _read_registry_unlocked(devices_path(data_dir))
+
+
+def _write_registry_unlocked(data_dir, data):
+    path = devices_path(data_dir)
+    fd, tmp = tempfile.mkstemp(prefix='.devices.', suffix='.tmp', dir=data_dir)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def server_lock_held(data_dir):
+    """True iff a running authserver holds data/.authserver.lock."""
+    path = os.path.join(data_dir, SERVER_LOCK_FILENAME)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # can't tell: be safe, assume running
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def server_answers():
+    return auth_client.Client(DEFAULT_DATA_DIR, AUTH_URL).answers()
+
+
+def server_running(args):
+    return server_lock_held(args.data) or server_answers()
+
+
+def offline_mutate(args, fn):
+    """Run fn(data) -> message on devices.json with the server down, holding
+    the exclusive devices lock across read, change and write."""
+    ensure_data_dir(args.data)
+    with devices_lock(args.data, exclusive=True):
+        # Re-check under the lock: a server starting now blocks in its
+        # load_state on this lock and then reads what we write.
+        if server_lock_held(args.data):
+            die("authserver started meanwhile; run the command again")
+        data = _read_registry_unlocked(devices_path(args.data))
+        msg = fn(data)
+        _write_registry_unlocked(args.data, data)
+    log("authserver not running: edited devices.json directly (offline)")
+    return msg
+
+
+def confirm(prompt, assume_yes=False):
+    if assume_yes:
+        return True
+    try:
+        ans = input(f"{prompt} [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return ans in ('y', 'yes')
+
+
+def fmt_ts(ts):
+    if not ts:
+        return "(never)"
+    return ts
+
+
+def fmt_status(dev):
+    if dev.get("revoked"):
+        return "revoked"
+    return "active"
+
+
+def truncate(s, n):
+    if len(s) <= n:
+        return s
+    return s[: n - 1] + '…'
+
+
+# --------------------------------------------------------------------------- #
+# Subcommands
+# --------------------------------------------------------------------------- #
+
+
+def current_devices(args):
+    """Devices as the server sees them (API) or, offline, as on disk."""
+    if server_running(args):
+        devs = api(args, 'GET', '/auth/admin/state').get("devices") or []
+        for d in devs:
+            for k in ("created_at", "last_seen"):
+                if isinstance(d.get(k), (int, float)) and d.get(k):
+                    d[k] = fmt_epoch(d[k])
+        return devs
+    return load_registry(args.data).get("devices", [])
+
+
+def cmd_list(args):
+    devices = current_devices(args)
+    if not devices:
+        print("No devices.")
+        return 0
+    rows = [
+        (
+            str(d.get("id", "")),
+            str(d.get("name", "")),
+            str(d.get("type") or "tunnel"),
+            str(d.get("role") or ("admin" if d.get("tunnel_admin") else "-")),
+            fmt_ts(d.get("created_at", "")),
+            fmt_ts(d.get("last_seen", "")),
+            fmt_status(d),
+        )
+        for d in devices
+    ]
+    print_table(("ID", "NAME", "TYPE", "ROLE", "CREATED", "LAST SEEN", "STATUS"), rows)
+    return 0
+
+
+def resolve_device(devices, needle):
+    """Find a device by id prefix OR exact name. Returns (device, error)."""
+    by_prefix = [d for d in devices if d.get("id", "").startswith(needle)]
+    by_name = [d for d in devices if d.get("name") == needle]
+    candidates = {d.get("id"): d for d in by_prefix}
+    for d in by_name:
+        candidates[d.get("id")] = d
+    matches = list(candidates.values())
+    if not matches:
+        return None, f"no device matches '{needle}'"
+    if len(matches) > 1:
+        names = ", ".join(f"{d.get('id')} ({d.get('name')})" for d in matches)
+        return None, f"ambiguous: '{needle}' matches multiple devices: {names}"
+    return matches[0], None
+
+
+def report_haproxy(res):
+    hap = res.get("haproxy")
+    if isinstance(hap, str) and hap.startswith("failed"):
+        log(f"WARNING: saved, but HAProxy was not updated ({hap}); "
+            f"the change is not live at the gate yet")
+
+
+def cmd_revoke(args):
+    running = server_running(args)
+    devices = current_devices(args)
+    device, err = resolve_device(devices, args.target)
+    if err:
+        die(err)
+    if device.get("revoked"):
+        print(f"Device '{device.get('name')}' ({device.get('id')}) is already revoked.")
+        return 0
+    if not confirm(f"Revoke '{device.get('name')}' ({device.get('id')})?", args.yes):
+        print("Aborted.")
+        return 1
+    if running:
+        res = api(args, 'POST', '/auth/admin/revoke', {"device_id": device["id"]})
+        report_haproxy(res)
+        if res.get("tunnel"):
+            log(f"tunnel: {res['tunnel']}")
+    else:
+        def fn(data):
+            for d in data.get("devices", []):
+                if d.get("id") == device["id"]:
+                    d["revoked"] = True
+                    d["revoked_at"] = iso_now()
+                    d["host_tokens"] = []
+                    return
+            die("device vanished")
+        offline_mutate(args, fn)
+        log("HAProxy maps are rewritten when cush-auth next starts")
+    print(f"Revoked '{device.get('name')}' ({device.get('id')}).")
+    return 0
+
+
+def cmd_role(args):
+    if not server_running(args):
+        die("authserver is not running; `role` needs it (bin/auth-deploy)")
+    device, err = resolve_device(current_devices(args), args.target)
+    if err:
+        die(err)
+    if args.role == 'admin' and not confirm(
+        f"Make '{device.get('name')}' ({device.get('id')}) an admin?", args.yes
+    ):
+        print("Aborted.")
+        return 1
+    res = api(args, 'POST', '/auth/admin/device-role',
+              {"device_id": device["id"], "role": args.role})
+    report_haproxy(res)
+    if "tunnel_admin" in res:
+        print(f"{device.get('id')}: tunnel_admin={res['tunnel_admin']}")
+    else:
+        print(f"{device.get('id')}: role={res.get('role')}")
+    return 0
+
+
+def cmd_rename(args):
+    if not server_running(args):
+        die("authserver is not running; `rename` needs it (bin/auth-deploy)")
+    name = args.name.strip()
+    if not name or len(name) > 64 or not name.isprintable():
+        die("name must be 1-64 printable characters")
+    device, err = resolve_device(current_devices(args), args.target)
+    if err:
+        die(err)
+    res = api(args, 'POST', '/auth/admin/device-rename',
+              {"device_id": device["id"], "name": name})
+    report_haproxy(res)
+    print(f"Renamed '{device.get('name')}' ({device.get('id')}) to '{res.get('name', name)}'.")
+    return 0
+
+
+def pairing_is_expired(p):
+    exp = p.get("expires_at")
+    if not exp:
+        return False
+    try:
+        dt = datetime.strptime(exp, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) > dt
+
+
+def current_pending(args):
+    if server_running(args):
+        out = api(args, 'GET', '/auth/admin/state').get("pairings") or []
+        for p in out:
+            for k in ("created_at", "expires_at"):
+                p[k] = fmt_epoch(p.get(k))
+        return out
+    return [
+        p for p in load_registry(args.data).get("pairings", [])
+        if p.get("status") == "pending" and not pairing_is_expired(p)
+    ]
+
+
+def cmd_pending(args):
+    active = current_pending(args)
+    if not active:
+        print("No pending pairings.")
+        return 0
+
+    rows = [
+        (
+            str(p.get("code", "")),
+            str(p.get("kind") or "tunnel"),
+            str(p.get("device_name", "")),
+            fmt_ts(p.get("created_at", "")),
+            fmt_ts(p.get("expires_at", "")),
+        )
+        for p in active
+    ]
+    print_table(("CODE", "KIND", "DEVICE NAME", "CREATED", "EXPIRES"), rows)
+    return 0
+
+
+def cmd_approve(args):
+    """Approve through the server: it mints a typed device (tunnel or
+    browser), keeps the plaintext token in memory only and hands it to the
+    waiting bootstrap / browser poll. Nothing secret is written to disk or
+    printed here."""
+    if not server_running(args):
+        die("authserver is not running; a pairing can only be approved through it "
+            "(the waiting client polls it for the token)")
+    code = args.code.strip().upper()
+    match = next((p for p in current_pending(args) if p.get("code") == code), None)
+    if match is None:
+        die(f"no pending pairing with code '{code}'")
+    kind = match.get("kind") or "tunnel"
+    body = {"code": code}
+    apps = split_apps(args.apps)
+    if kind == "web":
+        if not apps:
+            die("a web (browser) pairing needs an explicit scope: "
+                "--apps HOST[,HOST...] or --apps '*'")
+        body["apps"] = ["*"] if apps == ["*"] else apps
+    elif apps:
+        log("--apps ignored: tunnel pairings carry no web scope")
+    device_name = match.get("device_name") or "(unnamed)"
+    scope = f" with apps={','.join(body['apps'])}" if "apps" in body else ""
+    if not confirm(f"Approve {kind} pairing for '{device_name}' (code {code}){scope}?", args.yes):
+        print("Aborted.")
+        return 1
+    res = api(args, 'POST', '/auth/admin/approve', body)
+    report_haproxy(res)
+    print(f"Approved {res.get('type', kind)} device {res.get('device_id')} ('{device_name}').")
+    print("The waiting client picks up its token from the server automatically.")
+    return 0
+
+
+def read_new_password(from_stdin=False):
+    if from_stdin:
+        # One line on stdin (porch setup's admin step); never argv.
+        pw1 = sys.stdin.readline().rstrip("\n")
+        if len(pw1) < PASSWORD_MIN:
+            die(f"password must be at least {PASSWORD_MIN} characters")
+        return pw1
+    try:
+        pw1 = getpass.getpass("New admin password: ")
+        pw2 = getpass.getpass("Confirm password:   ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        die("password entry cancelled")
+    if pw1 != pw2:
+        die("passwords do not match")
+    if len(pw1) < PASSWORD_MIN:
+        die(f"password must be at least {PASSWORD_MIN} characters")
+    return pw1
+
+
+def cmd_set_password(args):
+    pw1 = read_new_password(getattr(args, 'stdin', False))
+    if getattr(args, 'rotate_sessions', False):
+        log("--rotate-sessions is deprecated; session_secret is now always rotated on password change")
+    if server_running(args):
+        api(args, 'POST', '/auth/admin/set-password', {"new": pw1})
+    else:
+        salt = secrets.token_bytes(SCRYPT_SALT_BYTES)
+        dk = hashlib.scrypt(
+            pw1.encode('utf-8'), salt=salt, n=SCRYPT_N, r=SCRYPT_R,
+            p=SCRYPT_P, maxmem=SCRYPT_MAXMEM, dklen=SCRYPT_DKLEN,
+        )
+
+        def fn(data):
+            admin = data.get("admin") or {}
+            admin["password_scrypt"] = base64.b64encode(dk).decode('ascii')
+            admin["salt"] = base64.b64encode(salt).decode('ascii')
+            # Always rotate session_secret (and stamp the epoch), matching
+            # the server: a password change ends every admin session.
+            admin["session_secret"] = base64.urlsafe_b64encode(
+                secrets.token_bytes(SESSION_SECRET_BYTES)
+            ).decode('ascii').rstrip('=')
+            admin["epoch"] = round(time.time(), 3)
+            data["admin"] = admin
+        offline_mutate(args, fn)
+    print("Admin password set.")
+    print("Session secret rotated — existing admin sessions are invalidated.")
+    return 0
+
+
+def cmd_server(args):
+    addr = args.addr.strip()
+    if not addr:
+        die("server address may not be empty")
+    if args.port is not None and not 1 <= args.port <= 65535:
+        die(f"port out of range: {args.port}")
+    if server_running(args):
+        body = {"addr": addr}
+        if args.port is not None:
+            body["port"] = args.port
+        res = api(args, 'POST', '/auth/admin/server', body)
+        srv = res.get("server") or {}
+        print(f"Server set to {srv.get('addr')}:{srv.get('port')}.")
+        return 0
+
+    def fn(data):
+        port = args.port if args.port is not None else data.get("server", {}).get("port", DEFAULT_SERVER_PORT)
+        data["server"] = {"addr": addr, "port": int(port)}
+        return int(port)
+    port = offline_mutate(args, fn)
+    print(f"Server set to {addr}:{port}.")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Server-backed subcommands (invite, apps)
+# --------------------------------------------------------------------------- #
+
+
+def read_cli_token(data_dir):
+    try:
+        return auth_client.Client(data_dir, AUTH_URL).token()
+    except auth_client.TokenError as e:
+        die(e.message)
+
+
+def api(args, method, path, body=None):
+    """Call the running authserver (lib/auth_client.py). Returns the decoded
+    JSON reply; exits with the server's error message on any non-2xx answer."""
+    try:
+        return auth_client.Client(args.data, AUTH_URL).request(method, path, body)
+    except (auth_client.TokenError, auth_client.BadReply) as e:
+        die(e.message)
+    except auth_client.AuthError as e:
+        msg = e.message
+        if e.status == 401:
+            msg = msg or 'unauthorized'
+            msg += ' (stale token? cush-auth rewrites it on every start)'
+        die(f"server said {e.status}: {msg or e.reason}")
+    except auth_client.AuthDown as e:
+        die(str(e))
+
+
+def fmt_epoch(ts):
+    if not ts:
+        return "-"
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def print_table(headers, rows):
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    for vals in [headers] + rows:
+        print("  ".join(v.ljust(w) for v, w in zip(vals, widths)).rstrip())
+
+
+def split_apps(values):
+    """--apps takes hosts separated by commas and/or repeated flags."""
+    out = []
+    for v in values or []:
+        out.extend(h.strip() for h in v.split(',') if h.strip())
+    return out
+
+
+def cmd_invite_create(args):
+    apps = split_apps(args.apps)
+    if not apps:
+        die("--apps needs at least one host")
+    if args.max_live is not None and not args.standing:
+        die("--max-live only applies to a --standing invite (use --max-uses)")
+    if args.max_uses is not None and args.standing:
+        die("a --standing invite is capped with --max-live, not --max-uses")
+    if args.standing and args.device_ttl_minutes is None:
+        die("a --standing invite needs --device-ttl-minutes (1440 = 24 hours)")
+    # Unset options are left out so the server's defaults apply: 24 hours and
+    # one use, or for a standing link no expiry and 20 live passes.
+    body = {"note": args.note or "", "apps": apps, "standing": args.standing}
+    if args.expires_hours is not None:
+        body["expires_hours"] = args.expires_hours
+    cap = args.max_live if args.standing else args.max_uses
+    if cap is not None:
+        body["max_uses"] = cap
+    if args.device_ttl_minutes is not None:
+        body["device_ttl_minutes"] = args.device_ttl_minutes
+    if args.landing:
+        body["landing"] = args.landing
+    res = api(args, 'POST', '/auth/admin/invites', body)
+    inv = res.get("invite") or {}
+    ttl = inv.get("device_ttl_minutes")
+    log(f"created {inv.get('id')} apps={','.join(inv.get('apps') or [])} "
+        f"{'max-live' if inv.get('standing') else 'uses'}={inv.get('max_uses')} "
+        f"expires={fmt_epoch(inv.get('expires_at')) if inv.get('expires_at') else 'never'} "
+        f"devices={'permanent' if ttl is None else str(ttl) + 'min'}")
+    log("the link is shown once; only its hash is stored")
+    # The URL alone on stdout, so `url=$(bin/auth-admin invite create ...)` works.
+    print(res.get("url", ""))
+    return 0
+
+
+def fmt_minutes(m):
+    if m is None:
+        return "permanent"
+    if m % 1440 == 0:
+        return f"{m // 1440}d"
+    if m % 60 == 0:
+        return f"{m // 60}h"
+    return f"{m}m"
+
+
+def cmd_invite_list(args):
+    invites = api(args, 'GET', '/auth/admin/state').get("invites") or []
+    if not args.all:
+        # "full" is a standing invite with every pass in use: still in service.
+        invites = [i for i in invites if i.get("status") in ("active", "full")]
+    if args.json:
+        print(json.dumps(invites, indent=2, sort_keys=True))
+        return 0
+    if not invites:
+        print("No invites." if args.all else "No active invites (--all shows finished ones).")
+        return 0
+    rows = [
+        (
+            str(i.get("id") or ""),
+            str(i.get("status") or ""),
+            # Standing: passes in use against the cap. Otherwise lifetime uses.
+            (f"{i.get('live', 0)}/{i.get('max_uses', 1)} live" if i.get("standing")
+             else f"{i.get('uses', 0)}/{i.get('max_uses', 1)}"),
+            str(i.get("live", 0)),
+            fmt_minutes(i.get("device_ttl_minutes")),
+            fmt_epoch(i.get("expires_at")) if i.get("expires_at") else "never",
+            ",".join(i.get("apps") or []),
+            truncate(i.get("note") or "", 40),
+        )
+        for i in invites
+    ]
+    print_table(("ID", "STATUS", "USES", "LIVE", "DEVICE", "EXPIRES", "APPS", "NOTE"), rows)
+    return 0
+
+
+def cmd_invite_revoke(args):
+    # Whether to cut off the devices too is asked every time, unless a flag
+    # answers it. Without a terminal to ask on, they are left alone.
+    also = args.devices
+    if not args.devices and not args.keep_devices:
+        invites = api(args, 'GET', '/auth/admin/state').get("invites") or []
+        live = next((i.get("live", 0) for i in invites if i.get("id") == args.id), 0)
+        if live and sys.stdin.isatty():
+            also = confirm(f"Also revoke the {live} device(s) it created?")
+        elif live:
+            log(f"{live} device(s) from this invite keep working "
+                f"(--devices revokes them too)")
+    res = api(args, 'POST', '/auth/admin/invite-revoke',
+              {"id": args.id, "revoke_devices": bool(also)})
+    cut = res.get("devices_revoked", 0)
+    if also:
+        print(f"Revoked invite {args.id} and {cut} device(s)/pass(es) it created.")
+    else:
+        print(f"Revoked invite {args.id}. Devices it created keep working.")
+    return 0
+
+
+def _ago(ts):
+    s = max(0, int(time.time() - (ts or 0)))
+    return f"{s}s ago" if s < 90 else f"{s // 60}m ago" if s < 5400 else f"{s // 3600}h ago"
+
+
+def cmd_access_list(args):
+    reqs = api(args, 'GET', '/auth/admin/access-requests').get("requests") or []
+    if not args.all:
+        reqs = [r for r in reqs if r.get("state") == "pending"]
+    if args.json:
+        print(json.dumps(reqs, indent=2, sort_keys=True))
+        return 0
+    if not reqs:
+        print("No one is asking for access." if not args.all else "No asks in the last hour.")
+        return 0
+    rows = []
+    for r in reqs:
+        who = r.get("note") or "-"
+        if r.get("kind") == "device":
+            who += f" (device {r.get('device_name') or r.get('device_id')})"
+        elif r.get("kind") == "expired":
+            who += " (pass ran out)"
+        rows.append((r.get("id", ""), r.get("host", ""), who, r.get("ip") or "-",
+                     _ago(r.get("created")), r.get("state", "")
+                     + (f" via {r['how']}" if r.get("how") else "")))
+    print_table(("ID", "HOST", "WHO", "FROM", "ASKED", "STATE"), rows)
+    return 0
+
+
+def cmd_access_decide(args):
+    decision = 'allow' if args.access_cmd == 'allow' else 'deny'
+    body_ttl = None
+    if decision == 'allow' and args.hours is not None:
+        if not 1 <= args.hours <= 720:
+            die("--hours must be 1-720")
+        body_ttl = args.hours * 60
+    body = {"id": args.id, "decision": decision}
+    if body_ttl is not None:
+        body["device_ttl_minutes"] = body_ttl
+    res = api(args, 'POST', '/auth/admin/access-requests/decide', body)
+    r = res.get("request") or {}
+    if decision == 'deny':
+        print(f"Denied {r.get('host', args.id)}; their page says not now.")
+    elif r.get("how") == "device":
+        print(f"Added {r.get('host')} to {r.get('device_name') or r.get('device_id')}'s pass; "
+              "their page goes straight in.")
+    else:
+        print(f"Allowed {r.get('host')}: a one-time invite ({r.get('invite_id')}) went to "
+              "their page; only they can see the link.")
+    return 0
+
+
+def cmd_apps_list(args):
+    hosts = api(args, 'GET', '/auth/admin/state').get("known_hosts") or []
+    if args.json:
+        print(json.dumps(hosts, indent=2, sort_keys=True))
+        return 0
+    rows = [
+        (h.get("host", ""), "protected" if h.get("protected") else "open")
+        for h in sorted(hosts, key=lambda h: h.get("host", ""))
+    ]
+    print_table(("HOST", "GATE"), rows)
+    return 0
+
+
+def cmd_apps_action(args):
+    host = args.host.strip().lower()
+    if args.apps_cmd == 'unprotect' and not confirm(
+        f"Stop protecting {host}? It becomes reachable without the gate.", args.yes
+    ):
+        print("Aborted.")
+        return 1
+    api(args, 'POST', '/auth/admin/apps', {"host": host, "action": args.apps_cmd})
+    done = {"protect": "now protected", "unprotect": "no longer protected",
+            "forget": "forgotten"}[args.apps_cmd]
+    print(f"{host}: {done}.")
+    return 0
+
+
+def _public_url(e):
+    return f"https://{e.get('host', '')}{e.get('path', '')}" + ("*" if e.get("kind") == "prefix" else "")
+
+
+def _hap_note(res):
+    hap = res.get("haproxy")
+    if hap and hap not in ("ok", "skipped"):
+        log(f"warning: HAProxy map sync: {hap} (the map file is written; "
+            f"the next HAProxy reload picks it up)")
+
+
+def cmd_public_list(args):
+    items = api(args, 'GET', '/auth/admin/public-paths').get("public_paths") or []
+    if args.json:
+        print(json.dumps(items, indent=2, sort_keys=True))
+        return 0
+    if not items:
+        print("No public paths.")
+        return 0
+    rows = [
+        (e.get("id", ""), _public_url(e), e.get("app", ""),
+         "on" if e.get("active") else (e.get("inactive") or "off"),
+         fmt_epoch(e.get("created_at")), e.get("why", ""))
+        for e in sorted(items, key=lambda e: (e.get("host", ""), e.get("path", "")))
+    ]
+    print_table(("ID", "URL", "APP", "STATE", "SINCE", "WHY"), rows)
+    return 0
+
+
+def cmd_public_add(args):
+    res = api(args, 'POST', '/auth/admin/public-paths', {
+        "action": "add", "host": args.host, "path": args.path,
+        "app": args.app, "why": args.why or "", "by": "cli",
+    })
+    e = res.get("entry") or {}
+    kind = "everything under" if e.get("kind") == "prefix" else "exactly"
+    print(f"{e.get('id')}: anyone can now open {kind} "
+          f"https://{e.get('host')}{e.get('path')} (no login).")
+    _hap_note(res)
+    return 0
+
+
+def cmd_public_action(args):
+    action = {"on": "enable", "off": "disable", "rm": "remove"}[args.public_cmd]
+    if action == "remove" and not confirm(f"Remove public path {args.id}?", args.yes):
+        print("Aborted.")
+        return 1
+    res = api(args, 'POST', '/auth/admin/public-paths',
+              {"action": action, "id": args.id, "by": "cli"})
+    e = res.get("entry")
+    if action == "remove":
+        print(f"{args.id}: removed (that path is behind the gate again).")
+    elif e and e.get("active"):
+        print(f"{args.id}: on; {_public_url(e)} is public.")
+    elif e and action == "enable":
+        print(f"{args.id}: switched on, but inactive: {e.get('inactive')}.")
+    else:
+        print(f"{args.id}: off (behind the gate again; the entry is kept).")
+    _hap_note(res)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+
+
+def _add_data_arg(parser, top=False):
+    # Only the top-level parser carries the default: a subcommand's own
+    # default would overwrite `auth-admin --data DIR <cmd>` with the live
+    # data/ (argparse lets a subparser default win over the parent's value).
+    parser.add_argument(
+        '--data', type=str, default=DEFAULT_DATA_DIR if top else argparse.SUPPRESS,
+        help=f'Path to the data directory (default: {DEFAULT_DATA_DIR})',
+    )
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog='auth-admin',
+        description='Manage the cush-tools device registry (data/devices.json).',
+    )
+    _add_data_arg(parser, top=True)
+    sub = parser.add_subparsers(dest='cmd', metavar='<command>')
+    sub.required = True
+
+    p_list = sub.add_parser('list', help='List all registered devices.')
+    _add_data_arg(p_list)
+    p_list.set_defaults(func=cmd_list)
+
+    p_revoke = sub.add_parser('revoke', help='Revoke a device by id-prefix or exact name.')
+    _add_data_arg(p_revoke)
+    p_revoke.add_argument('target', help='Device id prefix or exact name.')
+    p_revoke.add_argument('--yes', '-y', action='store_true', help='Skip confirmation prompt.')
+    p_revoke.set_defaults(func=cmd_revoke)
+
+    p_pending = sub.add_parser('pending', help='List unexpired pending pairings.')
+    _add_data_arg(p_pending)
+    p_pending.set_defaults(func=cmd_pending)
+
+    p_approve = sub.add_parser('approve', help='Approve a pending pairing by code.')
+    _add_data_arg(p_approve)
+    p_approve.add_argument('code', help='Pairing code (e.g. ABCD-1234).')
+    p_approve.add_argument('--apps', action='append', metavar='HOST[,HOST...]',
+                           help="Web pairings only, required: hosts the browser may reach, or '*'.")
+    p_approve.add_argument('--yes', '-y', action='store_true', help='Skip confirmation prompt.')
+    p_approve.set_defaults(func=cmd_approve)
+
+    p_role = sub.add_parser('role', help='Set a device role: admin|guest (tunnel devices: tunnel_admin).')
+    _add_data_arg(p_role)
+    p_role.add_argument('target', help='Device id prefix or exact name.')
+    p_role.add_argument('role', choices=('admin', 'guest'))
+    p_role.add_argument('--yes', '-y', action='store_true', help='Skip confirmation prompt.')
+    p_role.set_defaults(func=cmd_role)
+
+    p_rename = sub.add_parser('rename', help='Rename a device (by id prefix or exact name).')
+    _add_data_arg(p_rename)
+    p_rename.add_argument('target', help='Device id prefix or exact name.')
+    p_rename.add_argument('name', help='The new name (1-64 printable characters).')
+    p_rename.set_defaults(func=cmd_rename)
+
+    p_pw = sub.add_parser('set-password', help='Set (or change) the admin password.')
+    _add_data_arg(p_pw)
+    p_pw.add_argument('--stdin', action='store_true',
+                      help='Read the new password from one line on stdin (no prompt).')
+    p_pw.add_argument(
+        '--rotate-sessions', action='store_true',
+        help='Deprecated no-op: session_secret is now always rotated on password change.',
+    )
+    p_pw.set_defaults(func=cmd_set_password)
+
+    p_server = sub.add_parser('server', help='Set server.addr (and optionally server.port).')
+    _add_data_arg(p_server)
+    p_server.add_argument('addr', help='Server address returned to pairing clients.')
+    p_server.add_argument('port', type=int, nargs='?', default=None,
+                          help=f'Server port (default: {DEFAULT_SERVER_PORT} if unset).')
+    p_server.set_defaults(func=cmd_server)
+
+    # ---- invite / apps: served by the running authserver ----
+    p_inv = sub.add_parser('invite', help='Create, list and revoke invite links (via the running server).')
+    inv_sub = p_inv.add_subparsers(dest='invite_cmd', metavar='<action>')
+    inv_sub.required = True
+
+    p_ic = inv_sub.add_parser('create', help='Create an invite link; prints the one-time URL on stdout.')
+    _add_data_arg(p_ic)
+    p_ic.add_argument('--apps', action='append', required=True, metavar='HOST[,HOST...]',
+                      help='Hosts the invite grants (comma-separated or repeated).')
+    p_ic.add_argument('--note', default='', help='Who the invite is for (shown in the panel).')
+    p_ic.add_argument('--landing', default=None, metavar='HOST',
+                      help='App to land on after accepting (default: the first app).')
+    p_ic.add_argument('--expires-hours', type=int, default=None,
+                      help='How long the link works (default: 24; a standing link never expires unless set).')
+    p_ic.add_argument('--max-uses', type=int, default=None,
+                      help='How many browsers may accept it (default: 1).')
+    p_ic.add_argument('--device-ttl-minutes', type=int, default=None, metavar='MIN',
+                      help='Each device the link creates expires after this long '
+                           '(1440 = 24 hours, max 30 days). Default: permanent.')
+    p_ic.add_argument('--standing', action='store_true',
+                      help='A link meant to stay up (e.g. on a public page): needs '
+                           '--device-ttl-minutes, and the cap counts passes in use.')
+    p_ic.add_argument('--max-live', type=int, default=None, metavar='N',
+                      help='Standing only: passes that may be live at once (default: 20, max 500).')
+    p_ic.set_defaults(func=cmd_invite_create)
+
+    p_il = inv_sub.add_parser('list', help='List invites that are in service.')
+    _add_data_arg(p_il)
+    p_il.add_argument('--all', '-a', action='store_true',
+                      help='Include expired, used-up and revoked invites.')
+    p_il.add_argument('--json', action='store_true', help='Print raw JSON.')
+    p_il.set_defaults(func=cmd_invite_list)
+
+    p_ir = inv_sub.add_parser('revoke', help='Revoke an invite by id (inv_xxxxxxxx).')
+    _add_data_arg(p_ir)
+    p_ir.add_argument('id', help='Invite id, as shown by `invite list`.')
+    grp = p_ir.add_mutually_exclusive_group()
+    grp.add_argument('--devices', action='store_true',
+                     help='Also revoke the devices and passes the invite created.')
+    grp.add_argument('--keep-devices', action='store_true',
+                     help='Leave them working (no prompt).')
+    p_ir.set_defaults(func=cmd_invite_revoke)
+
+    p_apps = sub.add_parser('apps', help='List, protect, unprotect and forget gated hosts (via the running server).')
+    apps_sub = p_apps.add_subparsers(dest='apps_cmd', metavar='<action>')
+    apps_sub.required = True
+
+    p_al = apps_sub.add_parser('list', help='List known hosts and whether each is protected.')
+    _add_data_arg(p_al)
+    p_al.add_argument('--json', action='store_true', help='Print raw JSON.')
+    p_al.set_defaults(func=cmd_apps_list)
+
+    for name, text in (
+        ('protect', 'Require a device cookie for a host.'),
+        ('unprotect', 'Stop gating a host (it stays listed).'),
+        ('forget', 'Drop an unprotected host from the list.'),
+    ):
+        p_a = apps_sub.add_parser(name, help=text)
+        _add_data_arg(p_a)
+        p_a.add_argument('host', help='Hostname, e.g. grab.cush.rocks.')
+        p_a.add_argument('--yes', '-y', action='store_true', help='Skip confirmation prompt.')
+        p_a.set_defaults(func=cmd_apps_action)
+
+    p_pub = sub.add_parser('public', help='Public paths on gated apps: URLs anyone may open (via the running server).')
+    pub_sub = p_pub.add_subparsers(dest='public_cmd', metavar='<action>')
+    pub_sub.required = True
+
+    p_pl = pub_sub.add_parser('ls', aliases=['list'], help='List public paths.')
+    _add_data_arg(p_pl)
+    p_pl.add_argument('--json', action='store_true', help='Print raw JSON.')
+    p_pl.set_defaults(func=cmd_public_list)
+
+    p_pa = pub_sub.add_parser('add', help='Open a path on a gated host. A path ending in / is a prefix.')
+    _add_data_arg(p_pa)
+    p_pa.add_argument('host', help='A protected host, e.g. promo.cush.rocks.')
+    p_pa.add_argument('path', help='/s/ (prefix: everything under it) or /robots.txt (exact).')
+    p_pa.add_argument('--app', required=True, help='Who asked for it (1-40 characters).')
+    p_pa.add_argument('--why', default='', help='Why it is public (up to 120 characters).')
+    p_pa.set_defaults(func=cmd_public_add)
+
+    for name, text in (
+        ('on', 'Switch a public path back on.'),
+        ('off', 'Switch a public path off (kept, behind the gate again).'),
+        ('rm', 'Remove a public path.'),
+    ):
+        p_p = pub_sub.add_parser(name, help=text)
+        _add_data_arg(p_p)
+        p_p.add_argument('id', help='Public path id (pp_xxxxxxxx), as shown by `public ls`.')
+        p_p.add_argument('--yes', '-y', action='store_true', help='Skip confirmation prompt.')
+        p_p.set_defaults(func=cmd_public_action)
+
+    p_acc = sub.add_parser('access', help='Ask for access: people at a gate page asking to get in (via the running server).')
+    acc_sub = p_acc.add_subparsers(dest='access_cmd', metavar='<action>')
+    acc_sub.required = True
+    p_xl = acc_sub.add_parser('ls', aliases=['list'], help='List asks waiting on you.')
+    _add_data_arg(p_xl)
+    p_xl.add_argument('--all', action='store_true', help='Also the recently decided ones.')
+    p_xl.add_argument('--json', action='store_true', help='Print raw JSON.')
+    p_xl.set_defaults(func=cmd_access_list)
+    p_xa = acc_sub.add_parser('allow', help='Let them in: add the host to their device, or send '
+                              'a stranger a one-time invite.')
+    _add_data_arg(p_xa)
+    p_xa.add_argument('id', help='Request id, as shown by `access ls`.')
+    p_xa.add_argument('--hours', type=int, default=None,
+                      help="A stranger's new device lasts this long (default: permanent).")
+    p_xa.set_defaults(func=cmd_access_decide)
+    p_xd = acc_sub.add_parser('deny', help='Say not now.')
+    _add_data_arg(p_xd)
+    p_xd.add_argument('id', help='Request id, as shown by `access ls`.')
+    p_xd.set_defaults(func=cmd_access_decide)
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.data = os.path.abspath(args.data)
+    try:
+        return args.func(args) or 0
+    except KeyboardInterrupt:
+        print()
+        return 130
+
+
+if __name__ == '__main__':
+    sys.exit(main())

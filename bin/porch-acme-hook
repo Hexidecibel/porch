@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""porch-acme-hook auth|cleanup: certbot --manual DNS-01 hook for any porch DNS provider.
+
+certbot runs it with CERTBOT_DOMAIN / CERTBOT_VALIDATION set. It reads the
+provider, username, token ref and zone from the porch setup state
+($PORCH_SETUP_DIR/porch-setup.json, default <repo>/data), ADDS the TXT value
+at _acme-challenge.<domain> (never replaces: tunnel.X and *.tunnel.X share
+it), waits for every authoritative name server to serve it, and on cleanup
+deletes only the record holding its own value.
+
+Env overrides (refs only, never values): PORCH_DNS_PROVIDER, PORCH_DNS_ZONE,
+PORCH_DNS_USERNAME, PORCH_DNS_TOKEN_REF, PORCH_ACME_WAIT (seconds, 300),
+PORCH_ACME_NS (comma-separated servers to wait on instead of the zone's NS).
+Implementation: lib/porch_setup/acme.py hook_main().
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
+
+from porch_setup.acme import hook_main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(hook_main(sys.argv[1] if len(sys.argv) > 1 else ""))

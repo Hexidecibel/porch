@@ -1,0 +1,39 @@
+bin/frps
+bin/frpc
+logs/
+config/frps.toml
+config/frpc.toml
+config/porch.toml
+# porch connect paid/byo/oracle: the home relay frpc config (holds the relay token)
+config/relay-frpc.toml
+data/devices.json
+data/devices.json.bak-*
+data/backups/
+data/history.jsonl
+data/.admin-cli-token
+data/.admin-cli-token.tmp
+data/.admin-setup-token
+data/.home-frpc-token
+data/.authserver.lock
+data/.authserver.lock.*
+data/.devices.lock
+# atomic-write temp files (devices.json, history.jsonl, links.json, state)
+data/.*.tmp
+data/.links-*
+data/*.tmp
+__pycache__/
+.claude/scheduled_tasks.lock
+.claude/*.lock
+.claude/settings.json
+# porch setup engine state (lib/porch_setup/state.py)
+data/porch-setup.json
+data/porch-setup.log
+data/.porch-setup.lock
+data/porch-setup-backups/
+.claude/worktrees/
+share/porch-files.txt
+data/doors/
+# keys and env files never belong in the repo
+*.pem
+.env*
+!.env.example

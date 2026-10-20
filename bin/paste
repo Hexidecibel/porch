@@ -1,0 +1,170 @@
+#!/bin/bash
+# Share text content via a syntax-highlighted paste URL
+# Usage: bin/paste <name> [file]
+#        echo "content" | bin/paste <name>
+#        bin/paste <name> < file.py
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: paste <name> [file]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "Share text content via a syntax-highlighted paste URL."
+  echo ""
+  echo "Examples:"
+  echo "  paste mycode script.py    -> paste script.py as mycode.${PORCH_TUNNEL_BASE}"
+  echo "  echo 'hello' | paste msg  -> paste stdin as msg.${PORCH_TUNNEL_BASE}"
+  echo "  paste config < app.toml   -> paste file from stdin redirect"
+  echo ""
+  echo "If no file is given, reads from stdin/pipe."
+  exit 0
+fi
+
+BG_MODE=""
+ORIG_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--bg" ]; then BG_MODE=1
+    else ORIG_ARGS+=("$arg"); fi
+done
+set -- "${ORIG_ARGS[@]}"
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  echo "Usage: paste <name> [file]" >&2
+  exit 1
+fi
+tunnel_require_valid_name "$NAME"
+
+FILE="$2"
+CREATED_TEMP=""
+# Captured stdin goes in a per-user 0700 runtime dir, not shared /tmp.
+PASTE_DIR="$(python3 "$TUNNEL_DIR/lib/rundir.py" paste)" || exit 1
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" "$NAME" || exit 2
+
+# --bg daemonize: capture stdin before re-exec (daemon gets /dev/null)
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    if [ -z "$FILE" ]; then
+        PASTE_FILE=$(mktemp "$PASTE_DIR/paste-${NAME}-XXXXX")
+        cat > "$PASTE_FILE"
+        if [ ! -s "$PASTE_FILE" ]; then
+            echo "Error: No content provided" >&2
+            rm -f "$PASTE_FILE"
+            exit 1
+        fi
+        # Re-exec with the captured file as explicit arg
+        LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+        cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" "$PASTE_FILE" && {
+            echo "Paste: https://${NAME}.${PORCH_TUNNEL_BASE}"
+            door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+            exit 0
+        }
+        exit 1
+    else
+        # File arg given, no stdin to worry about
+        LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+        cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" "$FILE" && {
+            echo "Paste: https://${NAME}.${PORCH_TUNNEL_BASE}"
+            door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+            exit 0
+        }
+        exit 1
+    fi
+fi
+
+if [ -n "$FILE" ]; then
+  if [ ! -f "$FILE" ]; then
+    echo "Error: file not found: $FILE" >&2
+    exit 1
+  fi
+  PASTE_FILE="$FILE"
+  # If this is a daemonized re-exec with a temp file we created, claim it for cleanup
+  if [ -n "${_CUSH_DAEMONIZED:-}" ] && [[ "$FILE" == "$PASTE_DIR"/paste-${NAME}-* ]]; then
+    CREATED_TEMP="$FILE"
+  fi
+else
+  PASTE_FILE=$(mktemp "$PASTE_DIR/paste-${NAME}-XXXXX")
+  CREATED_TEMP="$PASTE_FILE"
+  cat > "$PASTE_FILE"
+  if [ ! -s "$PASTE_FILE" ]; then
+    echo "Error: No content provided" >&2
+    rm -f "$PASTE_FILE"
+    exit 1
+  fi
+fi
+
+# Auto-detect language from file extension
+LANG=""
+if [ -n "$FILE" ]; then
+  case "$FILE" in
+    *.py)          LANG="python" ;;
+    *.js)          LANG="javascript" ;;
+    *.ts)          LANG="typescript" ;;
+    *.json)        LANG="json" ;;
+    *.sh|*.bash)   LANG="bash" ;;
+    *.html)        LANG="html" ;;
+    *.css)         LANG="css" ;;
+    *.go)          LANG="go" ;;
+    *.rs)          LANG="rust" ;;
+    *.rb)          LANG="ruby" ;;
+    *.yaml|*.yml)  LANG="yaml" ;;
+    *.toml)        LANG="toml" ;;
+    *.md)          LANG="markdown" ;;
+    *.sql)         LANG="sql" ;;
+    *.xml)         LANG="xml" ;;
+  esac
+fi
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+  # An expired or owner-closed paste keeps its captured text for a reopen
+  # (lib/door_recipe.py, 7 days); a burned or used-up one never does.
+  if [ "$(door_owned_release "$NAME")" != keep ] && [ -n "$CREATED_TEMP" ]; then
+    rm -f "$CREATED_TEMP"
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Build lang args
+LANG_ARGS=""
+if [ -n "$LANG" ]; then
+  LANG_ARGS="--lang $LANG"
+fi
+
+# Start paste server in the background
+python3 "$TUNNEL_DIR/lib/pasteserver.py" --port "$PORT" --file "$PASTE_FILE" --name "$NAME" $LANG_ARGS &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+door_recipe_write "$NAME" paste --path "$PASTE_FILE" ${CREATED_TEMP:+--owned "$CREATED_TEMP"}
+tunnel_state_register "$NAME" "paste" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "Paste: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

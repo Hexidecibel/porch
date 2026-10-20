@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Run the cush-tools test suite (stdlib unittest, no dependencies).
+#
+# Usage: bin/test [unittest args]     e.g. bin/test -k swap
+# The tests use temp dirs and a fake HAProxy socket: safe to run on the live box.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
+cd "$TUNNEL_DIR"
+# The suite runs on the built-in (cush.rocks) domain defaults, never the live
+# config/porch.toml or a PORCH_* override in the caller's shell.
+while IFS= read -r v; do unset "$v"; done < <(compgen -v PORCH_)
+export PORCH_CONFIG=none
+# Launch recipes (lib/door_recipe.py) that any code path writes during the
+# run go to a throwaway dir, never the live data/doors.
+PORCH_DOORS_DIR="$(mktemp -d)"
+export PORCH_DOORS_DIR
+trap 'rm -rf "$PORCH_DOORS_DIR"' EXIT
+python3 -B -m unittest discover -s tests -v "$@"

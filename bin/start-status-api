@@ -1,0 +1,48 @@
+#!/bin/bash
+# Start the tunnel status API server
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+PORT=9471
+PID_FILE="$TUNNEL_DIR/logs/status-api.pid"
+
+# The PID file used to live at /tmp/tunnel-status-api.pid — a fixed path in a
+# world-writable directory, whose contents were fed straight to `kill`. It now
+# lives beside the logs, and every PID read out of it is confirmed to actually
+# be the status server before it is trusted.
+pid_is_status_api() {
+    local pid="$1"
+    [ -n "$pid" ] && [ "$pid" != "0" ] || return 1
+    cush_pids_for 'python*' 'statusserver.py' | grep -qx "$pid"
+}
+
+if [ -f "$PID_FILE" ]; then
+    existing_pid=$(cat "$PID_FILE")
+    if pid_is_status_api "$existing_pid"; then
+        echo "Status API already running (PID: $existing_pid)"
+        exit 0
+    fi
+    rm -f "$PID_FILE"
+fi
+
+# Also check by process identity
+running="$(cush_pids_for 'python*' "statusserver.py --port $PORT")"
+if [ -n "$running" ]; then
+    echo "Status API already running (PID: $(echo "$running" | tr '\n' ' '))"
+    exit 0
+fi
+
+mkdir -p "$TUNNEL_DIR/logs" /tmp/tunnel-state
+
+nohup python3 "$TUNNEL_DIR/lib/statusserver.py" --port "$PORT" --state-dir /tmp/tunnel-state \
+    > "$TUNNEL_DIR/logs/statusserver.log" 2>&1 &
+echo $! > "$PID_FILE"
+
+sleep 1
+
+if pid_is_status_api "$(cat "$PID_FILE")"; then
+    echo "Status API started on port $PORT (PID: $(cat "$PID_FILE"))"
+else
+    echo "Failed to start status API. Check $TUNNEL_DIR/logs/statusserver.log"
+    rm -f "$PID_FILE"
+    exit 1
+fi

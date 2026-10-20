@@ -1,0 +1,111 @@
+#!/bin/bash
+# Start a photo-collect server and expose it via tunnel
+# Usage: bin/photos [name]
+# Example: bin/photos           -> random subdomain like photos-a1b2c3.tunnel.cush.rocks
+#          bin/photos myalbum   -> myalbum.tunnel.cush.rocks
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+# Strip --bg from args early
+BG_MODE=""
+ORIG_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--bg" ]; then BG_MODE=1
+    else ORIG_ARGS+=("$arg"); fi
+done
+set -- "${ORIG_ARGS[@]}"
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: photos [name]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "Start a photo-collect server and expose it via tunnel."
+  echo "Anyone with the link can view and add photos, which appear in a live"
+  echo "gallery. Deleting and drag-to-reorder are owner-only: unlocked for any"
+  echo "cush-auth-enrolled browser (same gate as bin/media); guests view & add."
+  echo ""
+  echo "Examples:"
+  echo "  photos              -> random subdomain (e.g. photos-a1b2c3.${PORCH_TUNNEL_BASE})"
+  echo "  photos myalbum      -> myalbum.${PORCH_TUNNEL_BASE}"
+  echo ""
+  echo "Photos are saved to ~/photos/<name>/"
+  exit 0
+fi
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  NAME="photos-$(head -c3 /dev/urandom | xxd -p)"
+fi
+# $NAME also names the directory under ~/photos — validate before mkdir.
+tunnel_require_valid_name "$NAME"
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" "$NAME" || exit 2
+
+# Handle --bg mode (after name resolution)
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$NAME" && {
+        echo "Photos: https://${NAME}.${PORCH_TUNNEL_BASE}"
+        echo "Photos will be saved to: $HOME/photos/$NAME/"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+DROP_DIR="$HOME/photos/$NAME"
+mkdir -p "$DROP_DIR"
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  door_owned_release "$NAME" >/dev/null     # records "closed" if nobody said why
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Start photo server in the background
+# lib/mediaserver.py is the shared gallery engine (bin/media uses it too).
+# --kinds image keeps this launcher images-only. It no longer passes --open
+# (which made everyone with the link the owner): --devices gives photos the
+# same cush-auth owner gate as bin/media, and without a match nobody can
+# delete or reorder (fail closed). Loopback only: frpc is its one client.
+python3 "$TUNNEL_DIR/lib/mediaserver.py" \
+    --port "$PORT" \
+    --bind 127.0.0.1 \
+    --dir "$DROP_DIR" \
+    --kinds image \
+    --devices "$TUNNEL_DIR/data/devices.json" \
+    --title "$NAME" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+door_recipe_write "$NAME" photos
+tunnel_state_register "$NAME" "photos" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "Photos: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo "Photos will be saved to: $DROP_DIR"
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

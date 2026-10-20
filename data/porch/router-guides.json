@@ -1,0 +1,428 @@
+{
+ "schema": 1,
+ "_comment": "Port-forwarding guides used by porch connect manual (lib/porch_setup/net/router.py). Brands are matched in order: ISP gateways first. Menu paths are typical; firmware varies.",
+ "brands": [
+  {
+   "id": "xfinity",
+   "name": "Xfinity / Comcast gateway",
+   "match": [
+    "xfinity",
+    "comcast",
+    "xb6",
+    "xb7",
+    "xb8"
+   ],
+   "admin_url": "Xfinity app (the 10.0.0.1 page mostly redirects there)",
+   "menu": "Xfinity app > WiFi > View WiFi equipment > Advanced settings > Port forwarding > Add port forward",
+   "notes": "Pick this box from the device list, then add each port. If xFi Advanced Security is on it can block inbound traffic; turn it off or allow this device. If you run your own router behind the gateway, either put the gateway in bridge mode or forward on both (double NAT).",
+   "app_only": true
+  },
+  {
+   "id": "att",
+   "name": "AT&T gateway (BGW210 / BGW320 / Pace / Arris)",
+   "match": [
+    "at&t",
+    "att ",
+    "bgw210",
+    "bgw320",
+    "pace 5268",
+    "nvg"
+   ],
+   "admin_url": "http://192.168.1.254",
+   "menu": "Firewall > NAT/Gaming > Custom Services (create one per port) > Needed by Device: this box",
+   "notes": "Changes ask for the Device Access Code printed on the gateway's sticker. With your own router behind it, use IP Passthrough instead of forwarding twice."
+  },
+  {
+   "id": "verizon",
+   "name": "Verizon Fios router (G3100 / CR1000A)",
+   "match": [
+    "verizon",
+    "fios",
+    "g3100",
+    "cr1000"
+   ],
+   "admin_url": "http://myfiosgateway.com (or http://192.168.1.1)",
+   "menu": "Advanced > Security & Firewall > Port Forwarding",
+   "notes": "The admin password is on the router's sticker. The My Fios app also has Port Forwarding under Internet > My Network > Advanced."
+  },
+  {
+   "id": "spectrum",
+   "name": "Spectrum router",
+   "match": [
+    "spectrum",
+    "charter"
+   ],
+   "admin_url": "My Spectrum app",
+   "menu": "My Spectrum app > Services > Internet > your router > Advanced Settings > Port Forwarding > Add Port Forward",
+   "notes": "Spectrum's own routers (Askey/Sagemcom/Wave 2) are managed from the app.",
+   "app_only": true
+  },
+  {
+   "id": "cox",
+   "name": "Cox Panoramic Wifi",
+   "match": [
+    "cox",
+    "panoramic"
+   ],
+   "admin_url": "Panoramic Wifi app or https://www.cox.com/myconnection",
+   "menu": "Connect > See Network > Advanced Settings > Port Forwarding > Add Port Forward",
+   "notes": "",
+   "app_only": true
+  },
+  {
+   "id": "centurylink",
+   "name": "CenturyLink / Quantum Fiber modem",
+   "match": [
+    "centurylink",
+    "quantum fiber",
+    "c4000",
+    "c3000"
+   ],
+   "admin_url": "http://192.168.0.1",
+   "menu": "Advanced Setup > Port Forwarding (Quantum Fiber: the Quantum Fiber app > Network > Port Forwarding)",
+   "notes": "The admin login is on the modem's sticker."
+  },
+  {
+   "id": "frontier",
+   "name": "Frontier router",
+   "match": [
+    "frontier"
+   ],
+   "admin_url": "http://192.168.1.1 (or the Frontier app)",
+   "menu": "Advanced > Security & Firewall > Port Forwarding (Fios-style menus) or Firewall > Port Forwarding",
+   "notes": ""
+  },
+  {
+   "id": "starlink",
+   "name": "Starlink",
+   "match": [
+    "starlink"
+   ],
+   "admin_url": "Starlink app",
+   "menu": "Not possible on residential plans",
+   "notes": "Starlink residential service is behind carrier-grade NAT, so port forwarding cannot work, even with your own router in bypass mode. Use a relay mode (or IPv6-only, with its caveat).",
+   "app_only": true,
+   "cgnat": true
+  },
+  {
+   "id": "tmobile",
+   "name": "T-Mobile Home Internet",
+   "match": [
+    "t-mobile",
+    "tmobile",
+    "sagemcom fast 5688",
+    "nokia 5g21",
+    "arcadyan"
+   ],
+   "admin_url": "T-Life app",
+   "menu": "Not possible",
+   "notes": "T-Mobile Home Internet is behind carrier-grade NAT; port forwarding cannot work. Use a relay mode.",
+   "app_only": true,
+   "cgnat": true
+  },
+  {
+   "id": "eero",
+   "name": "eero",
+   "match": [
+    "eero"
+   ],
+   "admin_url": "eero app (no web admin)",
+   "menu": "eero app > Settings > Network settings > Reservations & port forwarding > Add a reservation (this box) > Add port forward",
+   "notes": "Reserve this box's IP first, then add the port forwards on that reservation.",
+   "app_only": true,
+   "upnp": "eero app > Settings > Network settings > UPnP"
+  },
+  {
+   "id": "google",
+   "name": "Google Nest Wifi / Google Wifi",
+   "match": [
+    "google wifi",
+    "nest wifi",
+    "onhub",
+    "google"
+   ],
+   "admin_url": "Google Home app (no web admin)",
+   "menu": "Google Home app > Wi-Fi > Settings > Advanced networking > Port management > + (pick this box) > add each port",
+   "notes": "",
+   "app_only": true,
+   "upnp": "Google Home app > Wi-Fi > Settings > Advanced networking > UPnP"
+  },
+  {
+   "id": "tplink_deco",
+   "name": "TP-Link Deco",
+   "match": [
+    "deco"
+   ],
+   "admin_url": "Deco app",
+   "menu": "Deco app > More > Advanced > NAT Forwarding > Port Forwarding > +",
+   "notes": "",
+   "app_only": true,
+   "upnp": "Deco app > More > Advanced > NAT Forwarding > UPnP"
+  },
+  {
+   "id": "netgear",
+   "name": "NETGEAR (Nighthawk / Orbi)",
+   "match": [
+    "netgear",
+    "orbi",
+    "nighthawk"
+   ],
+   "admin_url": "http://routerlogin.net (Orbi: http://orbilogin.com)",
+   "menu": "Advanced > Advanced Setup > Port Forwarding / Port Triggering > Port Forwarding > + Add (Orbi: Advanced > Advanced Setup > Port Forwarding)",
+   "notes": "Choose 'Add Custom Service', TCP, the same external and internal port, and this box's IP. Also reserve the IP under Advanced > Setup > LAN Setup > Address Reservation.",
+   "upnp": "Advanced > Advanced Setup > UPnP > Turn UPnP On"
+  },
+  {
+   "id": "tplink",
+   "name": "TP-Link",
+   "match": [
+    "tp-link",
+    "tplink",
+    "archer"
+   ],
+   "admin_url": "http://tplinkwifi.net",
+   "menu": "Advanced > NAT Forwarding > Virtual Servers (or Port Forwarding) > Add",
+   "notes": "Older firmware calls it Forwarding > Virtual Servers.",
+   "upnp": "Advanced > NAT Forwarding > UPnP"
+  },
+  {
+   "id": "asus",
+   "name": "ASUS",
+   "match": [
+    "asus",
+    "asustek",
+    "rt-ax",
+    "rt-ac",
+    "rt-be",
+    "zenwifi",
+    "asuswrt"
+   ],
+   "admin_url": "http://router.asus.com",
+   "menu": "Advanced Settings > WAN > Virtual Server / Port Forwarding > Add profile",
+   "notes": "Turn on 'Enable Port Forwarding' at the top of the page.",
+   "upnp": "Advanced Settings > WAN > Internet Connection > Enable UPnP"
+  },
+  {
+   "id": "linksys",
+   "name": "Linksys",
+   "match": [
+    "linksys",
+    "velop",
+    "cisco-linksys"
+   ],
+   "admin_url": "http://myrouter.local (or http://192.168.1.1)",
+   "menu": "Security > Apps and Gaming > Single Port Forwarding (Velop: the Linksys app > Advanced settings > Port forwarding)",
+   "notes": "",
+   "upnp": "Connectivity > Administration > UPnP"
+  },
+  {
+   "id": "ubiquiti",
+   "name": "Ubiquiti UniFi / EdgeRouter",
+   "match": [
+    "ubiquiti",
+    "unifi",
+    "ubnt",
+    "edgerouter",
+    "dream machine",
+    "udm"
+   ],
+   "admin_url": "UniFi Network (https://unifi.ui.com or the console's IP)",
+   "menu": "UniFi: Settings > Firewall & Security > Port Forwarding > Create Entry (older: Settings > Routing & Firewall > Port Forwarding). EdgeRouter: Firewall/NAT > Port Forwarding",
+   "notes": "",
+   "upnp": "UniFi: Settings > Internet > (WAN) > UPnP"
+  },
+  {
+   "id": "avm",
+   "name": "AVM FRITZ!Box",
+   "match": [
+    "fritz",
+    "avm"
+   ],
+   "admin_url": "http://fritz.box",
+   "menu": "Internet > Permit Access > Port Sharing > Add Device for Sharing > this box > New Sharing > Port sharing",
+   "notes": "",
+   "upnp": "Same page: 'Permit independent port sharing for this device'"
+  },
+  {
+   "id": "mikrotik",
+   "name": "MikroTik",
+   "match": [
+    "mikrotik",
+    "routeros"
+   ],
+   "admin_url": "WebFig at http://192.168.88.1 or Winbox",
+   "menu": "IP > Firewall > NAT > + : chain=dstnat, protocol=tcp, dst-port=<port>, in-interface=<WAN>, action=dst-nat, to-addresses=<this box>",
+   "notes": "Make sure the filter rules accept the forwarded traffic (the default config's 'drop all not DSTNATed' rule allows it).",
+   "upnp": "IP > UPnP (enable, mark the WAN interface external)"
+  },
+  {
+   "id": "dlink",
+   "name": "D-Link",
+   "match": [
+    "d-link",
+    "dlink"
+   ],
+   "admin_url": "http://dlinkrouter.local (or http://192.168.0.1)",
+   "menu": "Advanced > Port Forwarding (older: Advanced > Virtual Server)",
+   "notes": "",
+   "upnp": "Advanced > Advanced Network > UPnP"
+  },
+  {
+   "id": "belkin",
+   "name": "Belkin",
+   "match": [
+    "belkin"
+   ],
+   "admin_url": "http://router (or http://192.168.2.1)",
+   "menu": "Firewall > Virtual Servers",
+   "notes": ""
+  },
+  {
+   "id": "synology",
+   "name": "Synology router (SRM)",
+   "match": [
+    "synology",
+    "srm"
+   ],
+   "admin_url": "http://router.synology.com",
+   "menu": "Network Center > Port Forwarding > Create",
+   "notes": ""
+  },
+  {
+   "id": "huawei",
+   "name": "Huawei",
+   "match": [
+    "huawei"
+   ],
+   "admin_url": "http://192.168.3.1 (mobile routers: http://192.168.8.1)",
+   "menu": "More Functions > Security Settings > NAT Service / Port Mapping",
+   "notes": "Huawei 4G/5G routers on mobile networks are usually behind carrier-grade NAT; forwarding will not help there."
+  },
+  {
+   "id": "zte",
+   "name": "ZTE",
+   "match": [
+    "zte"
+   ],
+   "admin_url": "http://192.168.1.1 (or http://192.168.0.1)",
+   "menu": "Internet > Security > Port Forwarding (or Advanced > NAT > Port Forwarding)",
+   "notes": "ZTE 4G/5G routers on mobile networks are usually behind carrier-grade NAT."
+  },
+  {
+   "id": "tenda",
+   "name": "Tenda",
+   "match": [
+    "tenda"
+   ],
+   "admin_url": "http://tendawifi.com",
+   "menu": "Advanced > Port Forwarding (older: Advanced > Virtual Server)",
+   "notes": ""
+  },
+  {
+   "id": "zyxel",
+   "name": "Zyxel",
+   "match": [
+    "zyxel"
+   ],
+   "admin_url": "http://192.168.1.1",
+   "menu": "Network Setting > NAT > Port Forwarding > Add New Rule",
+   "notes": ""
+  },
+  {
+   "id": "xiaomi",
+   "name": "Xiaomi",
+   "match": [
+    "xiaomi",
+    "miwifi",
+    "redmi"
+   ],
+   "admin_url": "http://miwifi.com (or http://192.168.31.1)",
+   "menu": "Advanced settings > Port forwarding > Add rule",
+   "notes": ""
+  },
+  {
+   "id": "openwrt",
+   "name": "OpenWrt",
+   "match": [
+    "openwrt",
+    "luci"
+   ],
+   "admin_url": "LuCI at http://192.168.1.1",
+   "menu": "Network > Firewall > Port Forwards > Add",
+   "notes": "",
+   "upnp": "Install luci-app-upnp, then Services > UPnP"
+  },
+  {
+   "id": "pfsense",
+   "name": "pfSense / OPNsense",
+   "match": [
+    "pfsense",
+    "opnsense"
+   ],
+   "admin_url": "the firewall's web UI",
+   "menu": "Firewall > NAT > Port Forward > Add (OPNsense newer: Firewall > NAT > Destination NAT)",
+   "notes": "Keep 'Filter rule association' so the matching pass rule is created.",
+   "upnp": "Services > UPnP & NAT-PMP"
+  },
+  {
+   "id": "arris",
+   "name": "ARRIS / SURFboard",
+   "match": [
+    "arris",
+    "surfboard"
+   ],
+   "admin_url": "http://192.168.0.1",
+   "menu": "Advanced > Firewall > Port Forwarding (SURFboard mAX: SURFboard Central app > My Network > Port Management)",
+   "notes": "A SURFboard cable modem without Wi-Fi has no router: forward on the router plugged into it."
+  },
+  {
+   "id": "technicolor",
+   "name": "Technicolor (ISP gateway)",
+   "match": [
+    "technicolor",
+    "thomson"
+   ],
+   "admin_url": "http://10.0.0.1 or http://192.168.0.1",
+   "menu": "Advanced > Port Forwarding (ISP firmware varies)",
+   "notes": ""
+  },
+  {
+   "id": "sagemcom",
+   "name": "Sagemcom (ISP gateway)",
+   "match": [
+    "sagemcom"
+   ],
+   "admin_url": "http://192.168.1.1 or http://192.168.0.1",
+   "menu": "Access Control > Port Forwarding (ISP firmware varies)",
+   "notes": ""
+  },
+  {
+   "id": "motorola",
+   "name": "Motorola",
+   "match": [
+    "motorola"
+   ],
+   "admin_url": "http://192.168.0.1",
+   "menu": "Advanced > Forwarding",
+   "notes": ""
+  },
+  {
+   "id": "apple",
+   "name": "Apple AirPort",
+   "match": [
+    "airport"
+   ],
+   "admin_url": "AirPort Utility",
+   "menu": "AirPort Utility > (base station) > Edit > Network > Port Settings > +",
+   "notes": "AirPort base stations also speak NAT-PMP, so automatic mode may already work."
+  }
+ ],
+ "generic": {
+  "id": "generic",
+  "name": "your router",
+  "match": [],
+  "admin_url": "http://<gateway>",
+  "menu": "Look for 'Port Forwarding', 'Virtual Server', 'NAT' or 'Port Mapping', usually under Advanced, Firewall or Security.",
+  "notes": "The admin login is often on a sticker on the router. Forward each port to this box's LAN IP and give the box a DHCP reservation so its IP never changes."
+ }
+}

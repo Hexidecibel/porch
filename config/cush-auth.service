@@ -1,0 +1,21 @@
+# Template: edit the paths (/opt/porch = your checkout) and User= before
+# installing it to /etc/systemd/system/. A fresh `porch setup` installs its
+# own user units instead (config/templates/systemd/).
+[Unit]
+Description=cush-tools device auth server
+After=network.target
+
+[Service]
+ExecStart=/opt/porch/bin/authserver
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+WorkingDirectory=/opt/porch
+User=porch
+# No UMask=0077 on purpose: HAProxy must be able to read the map files (and
+# a maps dir the server creates). Secrets are created 0600 explicitly.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

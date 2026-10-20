@@ -1,0 +1,27 @@
+# Pocket as a systemd user service: one instance per pocket name, so
+# porch-pocket@pocket.service is https://pocket.<tunnel base>. Installed by
+# `bin/pocket --install-service [name]`; needs linger (loginctl enable-linger)
+# to come back after a reboot without a login.
+[Unit]
+Description=Porch Pocket %i (${brand}): share target + clipboard
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Foreground (no --bg): systemd is the supervisor. The door never expires,
+# and bin/tunnel's frpc reconnects on its own; if it gives up (frps down at
+# boot), the script exits non-zero and systemd starts it again.
+ExecStart=/bin/bash ${repo_dir}/bin/pocket %i --expires never
+WorkingDirectory=${repo_dir}
+Restart=on-failure
+# A clean stop by signal (143 / SIGTERM) is not a failure. bin/status close
+# escalates to SIGKILL when the tunnel is slow to go, which systemd restarts:
+# stop the service with `systemctl --user stop` or --uninstall-service.
+SuccessExitStatus=143 SIGTERM
+RestartSec=10
+TimeoutStopSec=20
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

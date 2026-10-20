@@ -1,0 +1,103 @@
+#!/bin/bash
+# Migrate a .env file into 1Password and emit a .cush-secrets manifest.
+#
+# Walks the source dotenv interactively, prompting Y/n/e/s for each line,
+# upserts each value into 1Password, and writes a `.cush-secrets` manifest
+# pointing at the newly-created refs. After this, `bin/inject` reproduces
+# the .env from the manifest.
+#
+# IMPORTANT: this writes secrets to 1Password. There is no automatic
+# rollback — undoing requires manually removing items via the 1Password
+# UI or `op item delete`.
+#
+# Requires a 1Password service-account token (or stored creds) configured
+# via `~/.config/cush-tools/op.env`. See `bin/inject -h` for setup details.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source both backend shims so OP_* / INFISICAL_* env vars are inherited by
+# the python child. Auth is checked per-scheme inside Python now (stash is
+# op-specific, so it probes 'op' there) — no bash-level cush_op_check needed.
+# shellcheck source=../lib/op.sh
+[ -f "$HOME/.config/cush-tools/op.env" ] && . "$TUNNEL_DIR/lib/op.sh"
+# shellcheck source=../lib/infisical.sh
+[ -f "$HOME/.config/cush-tools/infisical.env" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+
+show_help() {
+    cat <<'EOF'
+Usage: bin/stash [options]
+
+Migrate an existing .env file into 1Password and emit a .cush-secrets
+manifest pointing at the newly-created refs.
+
+  bin/stash                                # interactive: ./.env -> ./.cush-secrets
+  bin/stash --vault Work --item-template '{project}'
+  bin/stash --dry-run --yes                # preview without touching 1Password
+  bin/stash --keep-env                     # leave .env untouched after success
+  bin/stash --delete-env --yes             # rm .env (no confirmation prompt)
+
+Options:
+  --in <path>              Source .env (default: ./.env)
+  --out <path>             Destination manifest (default: ./.cush-secrets)
+  --vault <name>           Default vault for new items (default: cush)
+  --item-template <tmpl>   Item name template; {project} is substituted
+                           (default: {project})
+  --project-name <name>    Override {project} (default: basename of in_path's
+                           parent directory)
+  --dry-run                Show what would be created; do not call op
+  --yes                    Non-interactive: accept all defaults, no prompts
+  --gitignore-env          (default) append .env to .gitignore, leave file
+  --keep-env               leave .env entirely alone
+  --delete-env             rm .env after success (with confirmation unless
+                           --yes)
+  -h, --help               Show this help
+
+Per-line prompt choices (interactive mode):
+  Y  proceed with the default ref       (default on Enter)
+  n  skip this line — drop from manifest, do not write to op
+  e  edit the ref before writing
+  s  show the full secret value, then re-prompt
+
+Default ref:
+  op://<vault>/<item>/<env_name lowercased>
+
+Exit codes:
+  0  ok
+  2  argument or input error
+  3  1Password auth failure (op not installed, token missing/invalid)
+  4  1Password vault inaccessible / write failed / aborted on op error
+  5  user aborted (Ctrl-C / abort prompt)
+  7  manifest write failed
+
+WARNING: this writes secrets to 1Password. Undoing requires manual cleanup
+via the 1Password UI or `op item delete`. Use --dry-run first if unsure.
+
+After a successful stash:
+  bin/inject              # reproduces .env from .cush-secrets
+  bin/inject --check      # verifies all refs resolve in 1Password
+
+1Password setup (one-time): see `bin/inject -h` or
+~/.config/cush-tools/op.env.
+EOF
+}
+
+# Parse --help / -h before dispatching, so we can print without an op check.
+for a in "$@"; do
+    case "$a" in
+        -h|--help) show_help; exit 0 ;;
+    esac
+done
+
+# --self-test: developer escape hatch (bypasses op check).
+for a in "$@"; do
+    if [ "$a" = "--self-test" ]; then
+        exec python3 "$TUNNEL_DIR/lib/stash.py" --self-test
+    fi
+done
+
+# Forward all args to lib/stash.py. Python owns flag parsing AND op auth
+# probing (it calls cush_secrets.whoami_for_scheme('op') internally; --dry-run
+# skips the probe). Adding a new flag only requires a python edit.
+exec python3 "$TUNNEL_DIR/lib/stash.py" "$@"

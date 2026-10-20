@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# cush-tools healthcheck — prints a status summary of the home-box setup.
+#
+# Checks systemd, local processes, listening ports, public endpoints, and
+# data-file state. Read-only: never tries to fix anything. Exit code:
+#   0 = healthy  (no failures, no warnings)
+#   1 = degraded (warnings, no hard failures)
+#   2 = unhealthy (one or more hard failures)
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+DEVICES_JSON="$SCRIPT_DIR/data/devices.json"
+source "$SCRIPT_DIR/lib/porch-config.sh"
+BASE_URL="https://${PORCH_LANDING_HOST}"
+
+# --- Colors (only when stdout is a TTY) ----------------------------------------------
+
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    RESET=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; BOLD=""; DIM=""; RESET=""
+fi
+
+CHECK_PASS=$'\xe2\x9c\x93'   # ✓
+CHECK_FAIL=$'\xe2\x9c\x97'   # ✗
+CHECK_WARN=$'\xe2\x9a\xa0'   # ⚠
+
+pass_count=0
+warn_count=0
+fail_count=0
+
+pass() {
+    printf "  %s%s%s  %s\n" "$GREEN" "$CHECK_PASS" "$RESET" "$1"
+    pass_count=$((pass_count + 1))
+}
+warn() {
+    printf "  %s%s%s  %s%s%s\n" "$YELLOW" "$CHECK_WARN" "$RESET" "$YELLOW" "$1" "$RESET"
+    warn_count=$((warn_count + 1))
+}
+fail() {
+    printf "  %s%s%s  %s%s%s\n" "$RED" "$CHECK_FAIL" "$RESET" "$RED" "$1" "$RESET"
+    fail_count=$((fail_count + 1))
+}
+info() {
+    printf "  %s%s%s  %s\n" "$DIM" "i" "$RESET" "$1"
+}
+
+printf "\n%scush-tools healthcheck%s\n\n" "$BOLD" "$RESET"
+
+# --- 1. cush-auth systemd service ----------------------------------------------------
+
+status="$(systemctl is-active cush-auth 2>/dev/null || true)"
+if [[ "$status" == "active" ]]; then
+    pass "cush-auth service is active"
+else
+    fail "cush-auth service is not active (status: ${status:-unknown})"
+fi
+
+# --- 2. frps process -----------------------------------------------------------------
+
+if pgrep -f 'bin/frps' >/dev/null 2>&1; then
+    pass "frps process running"
+else
+    fail "frps process NOT running"
+fi
+
+# --- 3. frpc process (local client) --------------------------------------------------
+#
+# frpc is NOT a persistent service — it's spawned on-demand by bin/tunnel,
+# bin/serve, bin/drop, etc. So "no frpc" is only a problem when we also have
+# active tunnels in bin/status. We count alive tunnel state files to decide
+# whether a missing frpc should INFO (expected) or FAIL (something is wrong).
+
+frpc_running=false
+if pgrep -f 'bin/frpc' >/dev/null 2>&1; then
+    frpc_running=true
+fi
+
+# Count active tunnels: state files under /tmp/tunnel-state with a live PID.
+# This mirrors the liveness check bin/status uses before it prints entries;
+# bin/status itself has no machine-readable flag, and parsing its colorized
+# output is fragile. State files alone would over-count stale entries — the
+# PID check filters those out.
+TUNNEL_STATE_DIR="/tmp/tunnel-state"
+active_tunnels=0
+if [[ -d "$TUNNEL_STATE_DIR" ]]; then
+    for sf in "$TUNNEL_STATE_DIR"/*.json; do
+        [[ -f "$sf" ]] || continue
+        pid="$(python3 -c "import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get('pid', 0))
+except Exception:
+    print(0)" "$sf" 2>/dev/null || echo 0)"
+        if [[ -n "$pid" && "$pid" != "0" ]] && kill -0 "$pid" 2>/dev/null; then
+            active_tunnels=$((active_tunnels + 1))
+        fi
+    done
+fi
+
+if $frpc_running; then
+    pass "frpc process running"
+elif [[ "$active_tunnels" -eq 0 ]]; then
+    info "frpc not running (expected — no active tunnels)"
+else
+    fail "frpc NOT running but $active_tunnels active tunnel(s) present"
+fi
+
+# --- 4. Port 9512 (authserver) -------------------------------------------------------
+
+if ss -tlnp 2>/dev/null | grep -q '127.0.0.1:9512 '; then
+    pass "authserver listening on 127.0.0.1:9512"
+else
+    fail "authserver NOT listening on 127.0.0.1:9512"
+fi
+
+# --- 5. frps ports (7000, 7080, 7443, 7500) ------------------------------------------
+
+missing_ports=()
+for port in 7000 7080 7443 7500; do
+    if ! ss -tlnp 2>/dev/null | grep -qE "[:.]${port} "; then
+        missing_ports+=("$port")
+    fi
+done
+if [[ ${#missing_ports[@]} -eq 0 ]]; then
+    pass "frps ports listening (7000, 7080, 7443, 7500)"
+else
+    fail "frps ports NOT listening: ${missing_ports[*]}"
+fi
+
+# --- 6. Landing page -----------------------------------------------------------------
+
+code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE_URL/" 2>/dev/null || echo "000")"
+if [[ "$code" == "200" ]]; then
+    pass "landing page $BASE_URL/ returns 200"
+else
+    fail "landing page $BASE_URL/ returned $code"
+fi
+
+# --- 7. install.sh -------------------------------------------------------------------
+
+code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE_URL/install.sh" 2>/dev/null || echo "000")"
+if [[ "$code" == "200" ]]; then
+    pass "install.sh served (200)"
+else
+    fail "install.sh returned $code"
+fi
+
+# --- 8. Tarball served + freshness ---------------------------------------------------
+
+tarball_headers="$(curl -sI -m 10 "$BASE_URL/cush-tools.tar.gz" 2>/dev/null || true)"
+tarball_code="$(printf '%s' "$tarball_headers" | awk 'NR==1 {print $2}')"
+if [[ "$tarball_code" == "200" ]]; then
+    last_mod="$(printf '%s' "$tarball_headers" | grep -i '^last-modified:' | sed 's/^[Ll]ast-[Mm]odified: //; s/\r$//')"
+    if [[ -n "$last_mod" ]]; then
+        mod_epoch="$(date -d "$last_mod" +%s 2>/dev/null || echo 0)"
+        now_epoch="$(date +%s)"
+        age_days=$(( (now_epoch - mod_epoch) / 86400 ))
+        if [[ "$mod_epoch" -gt 0 && "$age_days" -le 7 ]]; then
+            pass "cush-tools.tar.gz served, fresh (${age_days}d old)"
+        elif [[ "$mod_epoch" -gt 0 ]]; then
+            warn "cush-tools.tar.gz served but stale (${age_days}d old — republish?)"
+        else
+            warn "cush-tools.tar.gz served but Last-Modified unparseable"
+        fi
+    else
+        warn "cush-tools.tar.gz served but no Last-Modified header"
+    fi
+else
+    fail "cush-tools.tar.gz returned ${tarball_code:-000}"
+fi
+
+# --- 9. Auth UI ----------------------------------------------------------------------
+
+code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE_URL/auth/" 2>/dev/null || echo "000")"
+if [[ "$code" == "200" ]]; then
+    pass "auth UI /auth/ returns 200"
+else
+    fail "auth UI /auth/ returned $code"
+fi
+
+# --- 10. Admin setup state -----------------------------------------------------------
+
+admin_response="$(curl -s -m 10 -w '\n__HTTPCODE__%{http_code}' "$BASE_URL/auth/admin/state" 2>/dev/null || true)"
+admin_code="$(printf '%s' "$admin_response" | sed -n 's/.*__HTTPCODE__\([0-9]*\)$/\1/p')"
+admin_body="$(printf '%s' "$admin_response" | sed 's/__HTTPCODE__[0-9]*$//')"
+needs_setup="$(printf '%s' "$admin_body" | python3 -c "import json,sys
+try:
+    d = json.loads(sys.stdin.read() or '{}')
+    print('1' if d.get('needs_setup') else '0')
+except Exception:
+    print('?')" 2>/dev/null || echo "?")"
+
+if [[ "$admin_code" == "401" ]]; then
+    pass "admin configured (anonymous /auth/admin/state returned 401)"
+elif [[ "$needs_setup" == "1" ]]; then
+    warn "admin password not set (needs_setup:true)"
+elif [[ "$needs_setup" == "0" ]]; then
+    pass "admin configured"
+else
+    fail "admin state unknown (http=${admin_code:-000})"
+fi
+
+# --- 11. Devices count ---------------------------------------------------------------
+
+if [[ -r "$DEVICES_JSON" ]]; then
+    device_count="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$DEVICES_JSON'))
+    print(sum(1 for dev in d.get('devices', []) if not dev.get('revoked')))
+except Exception:
+    print('?')
+" 2>/dev/null || echo "?")"
+    if [[ "$device_count" == "?" ]]; then
+        warn "devices.json unreadable or corrupt"
+    else
+        info "active devices: $device_count"
+    fi
+else
+    warn "devices.json missing at $DEVICES_JSON"
+fi
+
+# --- 12. Pending pairings count ------------------------------------------------------
+
+if [[ -r "$DEVICES_JSON" ]]; then
+    pending_count="$(python3 -c "
+import json
+try:
+    d = json.load(open('$DEVICES_JSON'))
+    print(sum(1 for p in d.get('pairings', []) if p.get('status') == 'pending'))
+except Exception:
+    print('?')
+" 2>/dev/null || echo "?")"
+    if [[ "$pending_count" == "?" ]]; then
+        warn "pairings unreadable from devices.json"
+    elif [[ "$pending_count" == "0" ]]; then
+        pass "no pending pairings"
+    else
+        warn "$pending_count pending pairing(s) — someone mid-pair?"
+    fi
+fi
+
+# --- 13. UFW for LAN -----------------------------------------------------------------
+
+# PORCH_LAN_CIDR (e.g. 192.168.1.0/24) names the LAN that ufw should allow;
+# unset = this check is skipped.
+LAN_CIDR="${PORCH_LAN_CIDR:-}"
+if [[ -z "$LAN_CIDR" ]]; then
+    info "UFW LAN rule not checked (set PORCH_LAN_CIDR, e.g. 192.168.1.0/24)"
+elif sudo -n ufw status 2>/dev/null | grep -qF -- "$LAN_CIDR"; then
+    pass "UFW rule present for $LAN_CIDR (LAN)"
+elif sudo ufw status 2>/dev/null | grep -qF -- "$LAN_CIDR"; then
+    pass "UFW rule present for $LAN_CIDR (LAN)"
+else
+    warn "UFW rule for $LAN_CIDR not found (or sudo prompted)"
+fi
+
+# --- 14. Disk space in /var/www/tunnel ----------------------------------------------
+
+if [[ -d /var/www/tunnel ]]; then
+    avail_kb="$(df -P -k /var/www/tunnel 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [[ -n "${avail_kb:-}" ]]; then
+        avail_mb=$(( avail_kb / 1024 ))
+        avail_gb_int=$(( avail_kb / 1024 / 1024 ))
+        human="$(df -h /var/www/tunnel 2>/dev/null | awk 'NR==2 {print $4}')"
+        if [[ "$avail_gb_int" -ge 1 ]]; then
+            pass "disk space in /var/www/tunnel: ${human} free"
+        else
+            warn "low disk in /var/www/tunnel: ${human} free (< 1GB)"
+        fi
+    else
+        warn "could not read disk usage for /var/www/tunnel"
+    fi
+else
+    warn "/var/www/tunnel does not exist"
+fi
+
+# --- Summary -------------------------------------------------------------------------
+
+printf "\n"
+total=$(( pass_count + warn_count + fail_count ))
+if [[ "$fail_count" -gt 0 ]]; then
+    printf "%s%sUNHEALTHY%s  %d passed, %d warned, %d failed (of %d)\n\n" \
+        "$BOLD" "$RED" "$RESET" "$pass_count" "$warn_count" "$fail_count" "$total"
+    exit 2
+elif [[ "$warn_count" -gt 0 ]]; then
+    printf "%s%sDEGRADED%s  %d passed, %d warned (of %d)\n\n" \
+        "$BOLD" "$YELLOW" "$RESET" "$pass_count" "$warn_count" "$total"
+    exit 1
+else
+    printf "%s%sHEALTHY%s  %d passed (of %d)\n\n" \
+        "$BOLD" "$GREEN" "$RESET" "$pass_count" "$total"
+    exit 0
+fi

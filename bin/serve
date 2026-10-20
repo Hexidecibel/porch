@@ -1,0 +1,123 @@
+#!/bin/bash
+# Serve a directory over HTTP and expose it via tunnel
+# Usage: bin/serve <directory> <name> [--list] [--allow-scripts] [--bg]
+# Example: bin/serve ~/projects/site lt
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+BG_MODE=""
+SERVE_FLAGS=()
+POS=()
+for arg in "$@"; do
+  case "$arg" in
+    --bg) BG_MODE=1 ;;
+    --list|--allow-scripts) SERVE_FLAGS+=("$arg") ;;
+    *) POS+=("$arg") ;;
+  esac
+done
+
+DIR="${POS[0]:-}"
+NAME="${POS[1]:-}"
+
+if [ -z "$DIR" ] || [ -z "$NAME" ]; then
+  echo "Usage: serve <directory> <name> [--list] [--allow-scripts] [--bg]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "Serves a directory over HTTP and exposes it via tunnel."
+  echo ""
+  echo "Safe defaults (lib/serveserver.py):"
+  echo "  - dotfiles and dot-directories (.env, .git, ...) are never served"
+  echo "  - symlinks leading outside the directory are refused"
+  echo "  - no directory listings (index.html is still served); --list enables them"
+  echo "  - pages are CSP-sandboxed (no JavaScript); --allow-scripts lifts that"
+  echo "  - GET/HEAD only, bound to 127.0.0.1"
+  echo ""
+  echo "Examples:"
+  echo "  serve ~/project lt         -> https://lt.${PORCH_TUNNEL_BASE}"
+  echo "  serve ./dist app --allow-scripts -> https://app.${PORCH_TUNNEL_BASE}"
+  exit 1
+fi
+
+if [ ! -d "$DIR" ]; then
+  echo "Error: '$DIR' is not a directory"
+  exit 1
+fi
+DIR="$(cd "$DIR" && pwd -P)"
+
+tunnel_require_valid_name "$NAME"
+
+# Dotfiles are refused by the server, but a repo root or a home directory is
+# rarely what someone meant to publish — say so.
+warn_sensitive() {
+  local hits=()
+  for f in .env .git .ssh .aws .netrc .npmrc .pypirc .cush-secrets id_rsa id_ed25519; do
+    [ -e "$DIR/$f" ] && hits+=("$f")
+  done
+  if [ "${#hits[@]}" -gt 0 ]; then
+    echo "Warning: $DIR contains ${hits[*]}" >&2
+    echo "         Dotfiles are NOT served, but everything else in this directory is public." >&2
+    echo "         Consider serving a build/output subdirectory instead." >&2
+  fi
+}
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" "$NAME" || exit 2
+
+# Handle --bg mode
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    warn_sensitive
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$DIR" "$NAME" "${SERVE_FLAGS[@]}" && {
+        echo "Serving $DIR -> https://${NAME}.${PORCH_TUNNEL_BASE}"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+[ "${_CUSH_DAEMONIZED:-}" = "1" ] || warn_sensitive
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  door_owned_release "$NAME" >/dev/null     # records "closed" if nobody said why
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Start the HTTP server in the background (replaces `python3 -m http.server`,
+# which bound 0.0.0.0, served .env/.git and followed symlinks out of $DIR).
+python3 "$TUNNEL_DIR/lib/serveserver.py" --port "$PORT" --directory "$DIR" "${SERVE_FLAGS[@]}" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+RECIPE_ARGS=(--path "$DIR")
+for f in "${SERVE_FLAGS[@]}"; do RECIPE_ARGS+=(--flag "$f"); done
+door_recipe_write "$NAME" serve "${RECIPE_ARGS[@]}"
+tunnel_state_register "$NAME" "serve" $$ "$PORT" "${SERVE_FLAGS[@]}"
+tunnel_state_watchdog "$NAME" &
+
+echo "Serving $DIR on http://127.0.0.1:$PORT"
+echo "Tunnel: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

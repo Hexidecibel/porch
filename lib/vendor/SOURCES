@@ -1,0 +1,86 @@
+Vendored front-end assets, served from the local servers instead of a CDN so
+the pages can run under a strict CSP (script-src 'self' + nonce) with no
+third-party origin.
+
+file                    source                                                                         sha512 (matches cdnjs SRI)
+highlight.min.js        https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js             sha512-D9gUyxqja7hBtkWpPWGt9wfbfaMGVt9gnyCvYa+jojwwPHLCzUm5i8rpk7vD7wNee9bA35eYIjobYPaQuKS1MQ==
+atom-one-dark.min.css   https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css sha512-Jk4AqjWsdSzSWCSuQTfYRIF84Rq/eV0G2+tu07byYwHcbTGfdmLrHjUSwvzp5HvbiqK4ibmNwdcG49Y5RGYPTg==
+marked.min.js           https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js                      sha512-tjg8I2d6Fi0OBGz1csmr7RfI4uupYaCfL/RqhVRTS42RMGwfBsjwBGmhzhI+e2dPmyew8cFkoxnVkGvADDLvbg==
+
+highlight.js: BSD-3-Clause (the "common" build: ~37 languages incl. python,
+javascript, typescript, json, bash, shell, xml/html, css, go, rust, ruby, yaml,
+ini/toml, markdown, sql, c, cpp, java, diff, php).  marked: MIT.
+
+To update: download the new versions, check the sha512 against cdnjs's SRI,
+and update this table.
+
+pdf.js (lib/vendor/pdfjs/), served by lib/viewserver.py at /static/pdfjs/ for
+the PDF viewer. pdfjs-dist 6.4.299 (published 2026-10-03), the modern build,
+from the npm tarball https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.4.299.tgz
+whose sha512 matched the registry's dist.integrity:
+  sha512-AVl138zALtfaAPvADulE0PZThbYzCBS79nL4pOSL/6Sm/4AH5A21BD9VHt97OlCuzJuCpmeZtAtkinisF4Vb1g==
+Copied out of it: package/build/pdf.min.mjs and pdf.worker.min.mjs, package/LICENSE,
+package/cmaps/ (all of it) and package/standard_fonts/ (all of it). The sha512
+was re-checked against the registry on 2026-10-19 when cmaps/ and
+standard_fonts/ were added (the two build files are byte-identical).
+
+file                    bytes    sha256
+pdf.min.mjs             458904   57456c8e0c81e46be31174b499ef77f2b9f5ee46d04412ba627320a36755d4c2
+pdf.worker.min.mjs      1264342  9536359f1b8367850d485731ca1d5e45c159a7b7a0912325e539937aa21ceb18
+
+cmaps/ (cMapUrl, cMapPacked): 168 .bcmap files, 1165667 bytes; sha256 of
+`cat $(ls cmaps/*.bcmap)` (C-locale sort) = 400384a25858868cf5544e1eb6651bb5575a26ba5db055cebaf47b5a3bedb32f.
+Adobe's CMap resources, BSD-3-Clause (cmaps/LICENSE).
+
+standard_fonts/ (standardFontDataUrl), the fonts a PDF may name without
+embedding: Foxit (BSD, LICENSE_FOXIT) and Liberation Sans (OFL 1.1,
+LICENSE_LIBERATION). 774339 bytes.
+
+file                             bytes  sha256
+FoxitDingbats.pfb                29513  845c752392b6c914fb989c75a08b7792b88f542d2499042ef2889f8c814a16ed
+FoxitFixedBoldItalic.pfb         19151  8a000945843bd31add06aee63bf9fd41b7578b4f3242a4b7cd46349ad9d24d4d
+FoxitFixedBold.pfb               18055  f1b7159702973f54fc86254ea38bcf3712b2a736eb3a0995751e9f4bb45ad603
+FoxitFixedItalic.pfb             18746  5007faf8320fa1fcc08b8894b356ad976f60b992ba29ee5272578bbdebaf3876
+FoxitFixed.pfb                   17597  b6c8fe53f134b8b6d4578cd2d544df4cee9624c4efa8d51a560fb40ea296101b
+FoxitSerifBoldItalic.pfb         20733  a406cac82583bf98175cb62c87ed5e95c45fbb34eece63a10b0a13e793cb2e10
+FoxitSerifBold.pfb               19395  0bdf4b04e964139818d51eda03d566ba999fc3ba2421b1c6c51f9dc969022e80
+FoxitSerifItalic.pfb             21227  610ae0687198045c4db5d1a6650fd5e92536631706382eb8b72e38df578d0ae9
+FoxitSerif.pfb                   19469  4f57d2b9d884af8f907bf22df6019b52d86cbf6214fdbd02b1ae05472a543f35
+FoxitSymbol.pfb                  16729  47967d055530e7357088a08403115425643ec2cdfd6201ba8af0fbd7116c1539
+LiberationSans-BoldItalic.ttf   135124  a224075ac17495ad0a3af3bc0a419ac0704a8b3fd1095456201fb9b095fc281d
+LiberationSans-Bold.ttf         137052  361c61b82d575c5c35fd9157fda8b0194bcfcd0d88ea8521a4fb5dd53d33dddc
+LiberationSans-Italic.ttf       162036  832b4406dbef23628800d3aaad21048534ac84d7e3ad955be83b8172ed8ef512
+LiberationSans-Regular.ttf      139512  f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f
+
+lib/vendor/pdfjs/ in all: 3.7 MB. viewserver lists cmaps/*.bcmap and
+standard_fonts/*.{pfb,ttf} into its exact-path static table at import.
+
+pdf.js: Apache-2.0 (LICENSE next to the files). The wasm decoders
+(package/wasm: OpenJPEG for JPEG 2000, JBIG2, qcms) are not shipped: they add
+0.35-1.6 MB, would have the worker compile WebAssembly, and their no-wasm JS
+fallbacks are another 0.6 MB; such images stay blank, the text still renders.
+To update: download the tarball, compare its sha512 with
+`npm view pdfjs-dist@<v> dist.integrity`, copy the files above, re-run
+sha256sum, update this table.
+
+Fonts (lib/vendor/fonts/), served by lib/porch_http.py at
+/__porch-assets/fonts/<name>.<sha256[:12]>.woff2 for lib/porch.css. Latin
+subset, static weights, woff2, from the @fontsource npm packages (v5.3.0)
+via https://cdn.jsdelivr.net/npm/@fontsource/<family>/files/<family>-latin-<weight>-normal.woff2
+All three families: SIL Open Font License 1.1 (OFL-*.txt next to the files).
+
+file                     source file                                     bytes  sha256
+bricolage-500.woff2      bricolage-grotesque-latin-500-normal.woff2      22476  b62688707e0820a9cf2a98e9b0349fbb348fd17f76b70a05b53e7a668e3f406f
+bricolage-700.woff2      bricolage-grotesque-latin-700-normal.woff2      22384  4c373ce3c1cca41c864eb3e27c059a59fc6310547ab9c9b6cd780d387ba24206
+geist-400.woff2          geist-latin-400-normal.woff2                    12956  ead637fd0b6b887d829b3ce3f25fdc242b1de0cfb69c0d97987933675d1315ba
+geist-500.woff2          geist-latin-500-normal.woff2                    13296  6145bf6706dbc1b6686f04f871489cf724951f00b752745896ccdcac07639a53
+geist-600.woff2          geist-latin-600-normal.woff2                    13372  edde7cc4e2719898f981a6d970a756030fff75a8ed36dd6a457a60181b889ebf
+geist-mono-400.woff2     geist-mono-latin-400-normal.woff2                9864  3f98383b122fe015a48536cd4a1cda855a201718923ffe74931a01597107b9b5
+geist-mono-500.woff2     geist-mono-latin-500-normal.woff2               10116  72971bd4908d3984fa1b1426bb363730e4957e16a0f58bfbca76993095715488
+                                                                 total  104464
+
+Bricolage Grotesque: Copyright 2022 The Bricolage Grotesque Project Authors
+(https://github.com/ateliertriay/bricolage). Geist, Geist Mono: Copyright 2024
+The Geist Project Authors (https://github.com/vercel/geist-font).
+To update: download the new files, re-run sha256sum, update this table. The
+served URL changes with the content hash, so browsers pick the new file up.

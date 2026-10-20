@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# PORCH_WEB_ROOT: where the landing page lives (porch setup's landing step
+# sets it for fresh installs). sudo is only used when it is not ours to write.
+WEB_ROOT="${PORCH_WEB_ROOT:-/var/www/tunnel}"
+SUDO=sudo
+if mkdir -p "$WEB_ROOT" 2>/dev/null && [[ -w "$WEB_ROOT" ]]; then SUDO=""; fi
+
+# Porch design system: porch.css + fonts under content-hashed names, the same
+# files every app serves at /__porch-assets/. Old hashed files are left in
+# place (a cached page may still name them); they are tiny.
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+python3 -I "$PROJECT_DIR/lib/porch_http.py" --export "$work" > /dev/null
+css_tag="$(python3 -I "$PROJECT_DIR/lib/porch_http.py" --css-tag)"
+[[ -n "$css_tag" ]] || { echo "!! lib/porch.css is missing" >&2; exit 1; }
+$SUDO mkdir -p "$WEB_ROOT/__porch-assets"
+$SUDO cp -r "$work/__porch-assets/." "$WEB_ROOT/__porch-assets/"
+$SUDO find "$WEB_ROOT/__porch-assets" -type d -exec chmod 755 {} +
+$SUDO find "$WEB_ROOT/__porch-assets" -type f -exec chmod 644 {} +
+echo "Deployed porch.css + fonts → $WEB_ROOT/__porch-assets/"
+
+# The landing page links the stylesheet by its hashed name. site/ is written
+# for the default (cush.rocks) domain; lib/porch_config.py's site_render swaps
+# in the configured hosts (a no-op on the default config).
+python3 -I - "$PROJECT_DIR/site/index.html" "$work/index.html" "$css_tag" "$PROJECT_DIR/lib" <<'PY'
+import sys
+src, dst, tag, lib = sys.argv[1:5]
+sys.path.insert(0, lib)
+import porch_config
+html = open(src, encoding='utf-8').read()
+if '<!--PORCH_CSS-->' not in html:
+    sys.exit('!! site/index.html has no <!--PORCH_CSS--> marker')
+html = porch_config.site_render(html, porch_config.get())
+open(dst, 'w', encoding='utf-8').write(html.replace('<!--PORCH_CSS-->', tag, 1))
+PY
+$SUDO cp "$work/index.html" "$WEB_ROOT/index.html"
+$SUDO chmod 644 "$WEB_ROOT/index.html"
+echo "Deployed site/index.html → $WEB_ROOT/index.html"
+
+# The closed-door page frps answers with for a tunnel name that has no live
+# door (frps.toml custom404Page). frps serves it on that dead host, so its fonts
+# go inline; frps reads the file per request, so no restart is needed.
+python3 -I - "$PROJECT_DIR/site/door-closed.html" "$work/door-closed.html" "$PROJECT_DIR/lib" <<'PY'
+import sys
+src, dst, lib = sys.argv[1:4]
+sys.path.insert(0, lib)
+import porch_config, porch_http
+html = open(src, encoding='utf-8').read()
+if '/*PORCH_FONTS*/' not in html:
+    sys.exit('!! site/door-closed.html has no /*PORCH_FONTS*/ marker')
+html = porch_config.site_render(html, porch_config.get())
+open(dst, 'w', encoding='utf-8').write(html.replace('/*PORCH_FONTS*/', porch_http.inline_font_faces(), 1))
+PY
+$SUDO cp "$work/door-closed.html" "$WEB_ROOT/door-closed.html"
+$SUDO chmod 644 "$WEB_ROOT/door-closed.html"
+echo "Deployed site/door-closed.html → $WEB_ROOT/door-closed.html"
+
+# Every site/*.sh: install.sh (client pairing) and porch.sh (server installer).
+for script in "$PROJECT_DIR"/site/*.sh; do
+    [[ -f "$script" ]] || continue
+    name="$(basename "$script")"
+    python3 -I "$PROJECT_DIR/lib/porch_config.py" render "$script" > "$work/$name"
+    $SUDO cp "$work/$name" "$WEB_ROOT/$name"
+    $SUDO chmod 755 "$WEB_ROOT/$name"
+    echo "Deployed site/$name → $WEB_ROOT/$name"
+done
+
+# The tarball is packed from what git knows, or, on an install with no .git,
+# from the share/porch-files.txt manifest that came with it (bin/publish-tarball).
+if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || [[ -f "$PROJECT_DIR/share/porch-files.txt" ]]; then
+    PORCH_WEB_ROOT="$WEB_ROOT" "$SCRIPT_DIR/publish-tarball"
+else
+    echo "Skipped the install tarball: $PROJECT_DIR has neither .git nor share/porch-files.txt" >&2
+fi

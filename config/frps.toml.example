@@ -1,0 +1,48 @@
+# frp server configuration
+bindPort = 7000
+vhostHTTPPort = 7080
+vhostHTTPSPort = 7443
+
+# Dashboard
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "CHANGE_ME"
+
+# Authentication
+# Real per-device auth is handled via the HTTP plugin below (see lib/authserver.py).
+# frp 0.67.0 still requires auth.method = "token" to be set, and both sides must
+# agree on the (empty) token value — the plugin does the real check against
+# metas.device_token from each frpc client.
+auth.method = "token"
+auth.token = ""
+
+# Subdomain support - clients use *.<tunnel_base>. Must equal [domain] tunnel_base
+# in config/porch.toml (bin/start-server warns when they differ).
+subDomainHost = "tunnel.cush.rocks"
+
+# A tunnel name with no live door gets the Porch closed-door page
+# (site/door-closed.html, rendered by bin/deploy; read per request).
+custom404Page = "/var/www/tunnel/door-closed.html"
+
+# Logging
+log.to = "/path/to/tunnel/logs/frps.log"
+log.level = "info"
+log.maxDays = 7
+
+# Per-device auth via cush-auth service (see lib/authserver.py)
+#   Login        validates `device_token` metadata; auto-approves from 127.0.0.1
+#   NewProxy     remote devices may only open http/https proxies on a plain
+#                subdomain (no tcp/udp remote ports, no custom_domains, no
+#                reserved names such as entry-*) unless the device is
+#                tunnel_admin (bin/auth-admin role <device> admin)
+#   NewWorkConn  re-checks the device on every new proxied connection, so a
+#                revoked device stops carrying traffic immediately
+#   Ping         re-checks on each client heartbeat; a revoked device's
+#                session is closed (only if its frpc sends heartbeats:
+#                transport.heartbeatInterval > 0, off by default with tcpMux)
+[[httpPlugins]]
+name = "device-auth"
+addr = "127.0.0.1:9512"
+path = "/verify"
+ops = ["Login", "NewProxy", "NewWorkConn", "Ping"]

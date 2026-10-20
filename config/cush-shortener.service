@@ -1,0 +1,17 @@
+# Template: edit the paths (/opt/porch = your checkout) and User= before
+# installing it to /etc/systemd/system/. A fresh `porch setup` installs its
+# own user units instead (config/templates/systemd/).
+[Unit]
+Description=Porch link shortener
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/porch/lib/shortenerserver.py --port 9411 --data /opt/porch/data/links.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+WorkingDirectory=/opt/porch
+User=porch
+
+[Install]
+WantedBy=multi-user.target

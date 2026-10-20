@@ -1,0 +1,151 @@
+#!/bin/bash
+# Share one file read-only in a browser viewer (lib/viewserver.py)
+# Usage: bin/view <path> [name] [--as TYPE] [--follow] [--owned-file] [door flags] [--bg]
+# Example: bin/view README.md readme --bg
+#          bin/view /var/log/app.log applog --follow --bg
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+# --expires/--password/--guest-link/--max-opens/--burn (lib/door-flags.sh)
+door_flags_parse "$@" || exit 2
+set -- "${DOOR_REST[@]}"
+
+VIEW_MODES="markdown code text pdf csv tsv json zip diff image video audio other"
+
+usage() {
+  echo "Usage: view <path> [name] [--as TYPE] [--follow] [--bg]"
+  echo "Door flags: --expires 30m|2h|1d|<ISO time>|never  --password  --guest-link  --max-opens N  --burn"
+  echo ""
+  echo "Shares one file read-only through a browser viewer:"
+  echo "  markdown, code/text (highlighted), pdf, csv/tsv (sortable table), json (tree),"
+  echo "  zip (browse entries without extracting), diff/patch, images, video, audio."
+  echo "The type is sniffed from the content (magic bytes first, then the extension);"
+  echo "--as TYPE overrides it ($VIEW_MODES)."
+  echo "--follow: a live log view of a growing file (like tail -F)."
+  echo "--owned-file: delete the file when the door closes (porch share's stdin copies;"
+  echo "  only honoured for files in the private run dir, \$XDG_RUNTIME_DIR/porch/share/)."
+  echo ""
+  echo "Examples:"
+  echo "  view notes.md            -> https://view-xxxxxx.${PORCH_TUNNEL_BASE}"
+  echo "  view report.pdf report   -> https://report.${PORCH_TUNNEL_BASE}"
+  echo "  view app.log logs --follow --bg"
+}
+
+BG_MODE=""
+FOLLOW=""
+AS_MODE=""
+OWNED=""
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bg) BG_MODE=1 ;;
+    --follow) FOLLOW=1 ;;
+    --owned-file) OWNED=1 ;;
+    --as)
+      if [ $# -lt 2 ]; then echo "Error: --as needs a type" >&2; exit 2; fi
+      AS_MODE="$2"; shift ;;
+    --as=*) AS_MODE="${1#*=}" ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "Error: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    *) POS+=("$1") ;;
+  esac
+  shift
+done
+
+FILE="${POS[0]:-}"
+NAME="${POS[1]:-}"
+if [ -z "$FILE" ] || [ "${#POS[@]}" -gt 2 ]; then
+  usage >&2
+  exit 1
+fi
+if [ -n "$AS_MODE" ] && ! [[ " $VIEW_MODES " == *" $AS_MODE "* ]]; then
+  echo "Error: --as must be one of: $VIEW_MODES" >&2
+  exit 2
+fi
+if [ -d "$FILE" ]; then
+  echo "Error: '$FILE' is a directory; share folders with bin/serve (or porch share)" >&2
+  exit 1
+fi
+if [ ! -f "$FILE" ] || [ ! -r "$FILE" ]; then
+  echo "Error: cannot read file: $FILE" >&2
+  exit 1
+fi
+# Resolve now: the daemon re-exec must see the same file whatever its cwd.
+FILE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$FILE")"
+
+# --owned-file: the file is ours to delete at exit, but only a direct child
+# of the private share run dir (where porch share writes stdin); anything
+# else is refused rather than deleted.
+if [ -n "$OWNED" ]; then
+  SHARE_RUN_DIR="$(python3 "$TUNNEL_DIR/lib/rundir.py" share)" || exit 1
+  SHARE_RUN_DIR="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$SHARE_RUN_DIR")"
+  if [ "$(dirname "$FILE")" != "$SHARE_RUN_DIR" ]; then
+    echo "Error: --owned-file only applies to files in $SHARE_RUN_DIR" >&2
+    exit 2
+  fi
+fi
+
+[ -n "$NAME" ] || NAME="view-$(head -c3 /dev/urandom | xxd -p)"
+tunnel_require_valid_name "$NAME"
+
+VIEW_FLAGS=()
+[ -n "$AS_MODE" ] && VIEW_FLAGS+=(--as "$AS_MODE")
+[ -n "$FOLLOW" ] && VIEW_FLAGS+=(--follow)
+OWN_FLAGS=()
+[ -n "$OWNED" ] && OWN_FLAGS+=(--owned-file)
+
+# Before the --bg re-exec: the password prompt needs our terminal, and the
+# spec (hash only) crosses the re-exec in env, never argv.
+door_spec_build "$BG_MODE" "$NAME" || exit 2
+
+if [ -n "$BG_MODE" ] && [ "${_CUSH_DAEMONIZED:-}" != "1" ]; then
+    LOG_FILE="$TUNNEL_DIR/logs/${NAME}.log"
+    cush_daemonize "$NAME" "$LOG_FILE" "$0" "$FILE" "$NAME" "${VIEW_FLAGS[@]}" "${OWN_FLAGS[@]}" && {
+        echo "View: https://${NAME}.${PORCH_TUNNEL_BASE}"
+        door_print_summary "$NAME"
+        echo "Log: $LOG_FILE"
+        exit 0
+    }
+    exit 1
+fi
+
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+  # An expired or owner-closed door keeps its file for a reopen
+  # (lib/door_recipe.py, 7 days); a burned or used-up one never does.
+  if [ "$(door_owned_release "$NAME")" != keep ] && [ -n "$OWNED" ]; then
+    rm -f -- "$FILE"
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+python3 "$TUNNEL_DIR/lib/viewserver.py" --port "$PORT" --file "$FILE" --name "$NAME" "${VIEW_FLAGS[@]}" &
+HTTP_PID=$!
+wait_for_port "$PORT" || exit 1
+
+RECIPE_ARGS=(--path "$FILE")
+for f in "${VIEW_FLAGS[@]}"; do RECIPE_ARGS+=(--flag "$f"); done
+[ -n "$OWNED" ] && RECIPE_ARGS+=(--owned "$FILE")
+door_recipe_write "$NAME" view "${RECIPE_ARGS[@]}"
+tunnel_state_register "$NAME" "view" $$ "$PORT" "${VIEW_FLAGS[@]}"
+tunnel_state_watchdog "$NAME" &
+
+echo "Viewing $FILE on http://127.0.0.1:$PORT"
+echo "View: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo ""
+
+door_print_summary "$NAME"
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

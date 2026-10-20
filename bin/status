@@ -1,0 +1,612 @@
+#!/bin/bash
+# Tunnel status and management tool
+# Usage: bin/status              Show active tunnels
+#        bin/status close <name>  Close a tunnel
+#        bin/status close-all     Close all tunnels
+#        bin/status extend <name> [min]  Extend timeout (default: 60m)
+#        bin/status keep <name>          Never expire
+#        bin/status expire <name> <when> Expire at 30m|2h|1d|<ISO time>|never
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TUNNEL_STATE_DIR="/tmp/tunnel-state"
+# PORCH_TUNNEL_BASE for the listing's URLs (standalone: no tunnel-state.sh).
+source "$TUNNEL_DIR/lib/porch-config.sh"
+
+# Colors — use ANSI-C quoting so the bytes are actual ESC characters.
+# This means the variables can be safely used with `printf` or `echo` without
+# relying on `echo -e` (which is non-portable across shells).
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+RESET=$'\033[0m'
+
+# ─── Help ────────────────────────────────────────────────────────────────────
+
+show_help() {
+    echo "Usage: bin/status              Show active tunnels"
+    echo "       bin/status close <name>  Close a tunnel"
+    echo "       bin/status close-all     Close all tunnels"
+    echo "       bin/status extend <name> [min]  Extend timeout (default: 60m)"
+    echo "       bin/status keep <name>          Never expire (until closed)"
+    echo "       bin/status expire <name> <when> Expire at 30m|2h|1d|<ISO-8601 time>|never"
+    echo ""
+    echo "Share rules (password, guest link, max opens): porch door rules <name> ..."
+    exit 0
+}
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_help
+fi
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+format_duration() {
+    local seconds="$1"
+    if [ "$seconds" -lt 0 ]; then
+        seconds=$(( -seconds ))
+    fi
+    local hours=$((seconds / 3600))
+    local minutes=$(( (seconds % 3600) / 60 ))
+    if [ "$hours" -gt 0 ]; then
+        echo "${hours}h ${minutes}m"
+    elif [ "$minutes" -gt 0 ]; then
+        echo "${minutes}m"
+    else
+        echo "<1m"
+    fi
+}
+
+read_state_file() {
+    local file="$1"
+    python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    s = json.load(f)
+print(s.get('name', ''))
+print(s.get('type', ''))
+print(s.get('pid', 0))
+print(s.get('port', 0))
+print(s.get('started', 0))
+exp = s.get('expires', 0)
+print(0 if exp is None else exp)
+print('true' if s.get('keep_alive', False) or exp is None else 'false')
+print('true' if s.get('daemonized', False) else 'false')
+print(s.get('log', ''))
+" "$file" 2>/dev/null
+}
+
+# ─── Process identification ──────────────────────────────────────────────────
+#
+# Signalling with a loose `pkill -f <substring>` has killed innocent processes
+# here more than once: `pkill -f "frpc.*<name>"` matches ANY command line that
+# contains both strings — an editor with the config open, a grep, an agent's
+# shell that happens to mention the tunnel. Everything below starts from a real
+# PID and verifies the process is what we think it is before signalling it.
+
+proc_cmdline() {
+    # Full argv of a PID as one space-separated string. /proc on Linux,
+    # `ps -o args=` everywhere else (macOS has no /proc).
+    local pid="$1"
+    if [ -r "/proc/$pid/cmdline" ]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline"
+    else
+        ps -o args= -p "$pid" 2>/dev/null
+    fi
+}
+
+proc_started() {
+    # Best-effort start time (epoch seconds) for a PID. Uses POSIX
+    # `ps -o etime=` (elapsed time) rather than /proc or `stat`, whose flags
+    # differ between GNU and BSD. Prints nothing when it can't be determined.
+    local pid="$1"
+    [ -n "$pid" ] || return 1
+    python3 -c "
+import subprocess, sys, time
+pid = sys.argv[1]
+try:
+    out = subprocess.check_output(['ps', '-o', 'etime=', '-p', pid], stderr=subprocess.DEVNULL).decode().strip()
+    # etime format: [[DD-]HH:]MM:SS
+    days = 0
+    if '-' in out:
+        d, rest = out.split('-', 1)
+        days = int(d)
+    else:
+        rest = out
+    parts = [int(p) for p in rest.split(':')]
+    if len(parts) == 3:
+        h, m, s = parts
+    elif len(parts) == 2:
+        h, m, s = 0, parts[0], parts[1]
+    else:
+        raise ValueError('bad etime')
+    print(int(time.time()) - (days * 86400 + h * 3600 + m * 60 + s))
+except Exception:
+    pass
+" "$pid" 2>/dev/null || true
+}
+
+frpc_pids_for() {
+    # PIDs of real frpc processes serving this tunnel. `pgrep -x frpc` compares
+    # the process NAME (not the command line), so only an actual frpc binary is
+    # ever a candidate; the config path then pins it to this tunnel. A shell
+    # that merely mentions "frpc" and the name is named bash/fish and cannot
+    # match.
+    local name="$1" pid arg suffix
+    for pid in $(pgrep -x frpc 2>/dev/null); do
+        for arg in $(proc_cmdline "$pid"); do
+            case "$arg" in
+                "/tmp/frpc-${name}-"*.toml) ;;
+                *) continue ;;
+            esac
+            # bin/tunnel's config is /tmp/frpc-<name>-<mktemp suffix>.toml and
+            # the suffix is one alphanumeric run. Checking it stops "verifi"
+            # from matching (and killing) verifi-sp and verifi-saml-sp.
+            suffix="${arg#/tmp/frpc-${name}-}"
+            suffix="${suffix%.toml}"
+            case "$suffix" in
+                ""|*[!A-Za-z0-9]*) continue ;;
+            esac
+            printf '%s\n' "$pid"
+            break
+        done
+    done
+}
+
+server_pids_for() {
+    # PIDs of the helper server a tool started on a given port, e.g.
+    # `python3 .../lib/dropserver.py --port 41234 --dir ...`. Requires a python
+    # interpreter running that script with that exact --port argument.
+    local script="$1" port="$2" pid cmdline comm
+    for pid in $(pgrep -f "$script" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        comm="$(ps -o comm= -p "$pid" 2>/dev/null)"
+        case "$comm" in python*) ;; *) continue ;; esac
+        cmdline="$(proc_cmdline "$pid")"
+        case "$cmdline" in
+            *"lib/${script}"*"--port ${port} "*|*"lib/${script}"*"--port ${port}")
+                printf '%s\n' "$pid" ;;
+        esac
+    done
+}
+
+pid_matches_state() {
+    # Guard against PID reuse. The state file records when the tunnel started;
+    # a process that demonstrably started well before that is not our tunnel,
+    # and group-killing a recycled PID takes out an entire unrelated process
+    # group. An unknown start time is treated as a match, so this can never
+    # stop a legitimate close from working.
+    local pid="$1" started="$2" pstart delta
+    [ -n "$started" ] && [ "$started" != "0" ] || return 0
+    pstart="$(proc_started "$pid")"
+    [ -n "$pstart" ] || return 0
+    delta=$(( pstart - started ))
+    [ "$delta" -lt 0 ] && delta=$(( -delta ))
+    [ "$delta" -le 300 ]
+}
+
+signal_pid() {
+    # TERM, then KILL if it is still there. Pass "group" as $2 to signal the
+    # whole process group (daemonized tunnels are group leaders).
+    local pid="$1" group="${2:-}"
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [ "$group" = "group" ]; then
+        kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+        sleep 0.3
+        kill -0 "$pid" 2>/dev/null && { kill -9 -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null; }
+    else
+        kill "$pid" 2>/dev/null
+        sleep 0.3
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    fi
+    return 0
+}
+
+# Tunnel names are DNS labels (see lib/tunnel-state.sh). Validated here too so
+# that `status close ../../foo` can't aim `rm -f` at an arbitrary .json file.
+tunnel_name_is_valid() {
+    case "$1" in
+        *[!A-Za-z0-9-]*|""|-*|*-) return 1 ;;
+    esac
+    [ "${#1}" -le 63 ]
+}
+
+# ─── Close ───────────────────────────────────────────────────────────────────
+
+cmd_close() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        echo "Usage: bin/status close <name>"
+        exit 1
+    fi
+    if ! tunnel_name_is_valid "$name"; then
+        echo "Invalid tunnel name: $name" >&2
+        exit 1
+    fi
+
+    local state_file="${TUNNEL_STATE_DIR}/${name}.json"
+
+    if [ -f "$state_file" ]; then
+        # Closed by its owner: the launch recipe (lib/door_recipe.py) keeps it
+        # reopenable, with the rules it has now.
+        python3 "$TUNNEL_DIR/lib/door_recipe.py" closed "$name" closed \
+            --state-file "$state_file" 2>/dev/null || true
+        local info
+        info=$(read_state_file "$state_file")
+        local pid port started daemonized
+        pid=$(echo "$info" | sed -n '3p')
+        port=$(echo "$info" | sed -n '4p')
+        started=$(echo "$info" | sed -n '5p')
+        daemonized=$(echo "$info" | sed -n '8p')
+
+        # Kill the main process (group kill for daemonized/setsid processes).
+        # The recorded PID is checked against the recorded start time first —
+        # a stale state file whose PID has been recycled would otherwise take
+        # out whatever inherited that PID, and for a daemonized tunnel that is
+        # a whole process group.
+        if [ -n "$pid" ] && [ "$pid" != "0" ] && kill -0 "$pid" 2>/dev/null; then
+            if pid_matches_state "$pid" "$started"; then
+                if [ "$daemonized" = "true" ]; then
+                    signal_pid "$pid" group
+                else
+                    signal_pid "$pid"
+                fi
+            else
+                echo "Refusing to signal PID $pid: start time does not match tunnel '$name' (stale state file?)" >&2
+            fi
+        fi
+
+        # Kill this tunnel's frpc, matched by PID + its own generated config.
+        local fpid
+        for fpid in $(frpc_pids_for "$name"); do
+            signal_pid "$fpid"
+        done
+
+        # Kill the helper server this tool started on the recorded port.
+        if [ -n "$port" ] && [ "$port" != "0" ]; then
+            local server spid
+            for server in exchangeserver.py pasteserver.py dropserver.py secureentry.py; do
+                for spid in $(server_pids_for "$server" "$port"); do
+                    signal_pid "$spid"
+                done
+            done
+        fi
+
+        rm -f "$state_file" "${TUNNEL_STATE_DIR}/.${name}.lock" "${TUNNEL_STATE_DIR}/.${name}.secret"
+        echo "Closed: $name"
+    else
+        # Try to find an unmanaged frpc process
+        local fpids fpid
+        fpids="$(frpc_pids_for "$name")"
+        if [ -n "$fpids" ]; then
+            for fpid in $fpids; do
+                signal_pid "$fpid"
+            done
+            echo "Closed: $name (unmanaged)"
+        else
+            echo "No tunnel found: $name"
+            exit 1
+        fi
+    fi
+}
+
+# ─── Close All ───────────────────────────────────────────────────────────────
+
+cmd_close_all() {
+    local count=0
+    if [ -d "$TUNNEL_STATE_DIR" ]; then
+        for state_file in "$TUNNEL_STATE_DIR"/*.json; do
+            [ -f "$state_file" ] || continue
+            local name
+            name=$(basename "$state_file" .json)
+            # cmd_close exits non-zero on a name it won't touch; in a bulk
+            # close that must skip the entry, not abort the whole sweep.
+            if ! tunnel_name_is_valid "$name"; then
+                echo "Skipping state file with invalid name: $name" >&2
+                continue
+            fi
+            ( cmd_close "$name" ) || true
+            count=$((count + 1))
+        done
+    fi
+
+    if [ "$count" -eq 0 ]; then
+        echo "No managed tunnels to close."
+    else
+        echo ""
+        echo "Closed $count tunnel(s)."
+    fi
+}
+
+# ─── Extend ──────────────────────────────────────────────────────────────────
+
+cmd_extend() {
+    local name="$1"
+    local minutes="${2:-60}"
+
+    if [ -z "$name" ]; then
+        echo "Usage: bin/status extend <name> [minutes]"
+        exit 1
+    fi
+    if ! tunnel_name_is_valid "$name"; then
+        echo "Invalid tunnel name: $name" >&2
+        exit 1
+    fi
+    if ! [[ "$minutes" =~ ^[0-9]+$ ]]; then
+        echo "Invalid minutes: $minutes" >&2
+        exit 1
+    fi
+
+    local state_file="${TUNNEL_STATE_DIR}/${name}.json"
+    if [ ! -f "$state_file" ]; then
+        echo "No tunnel found: $name"
+        exit 1
+    fi
+
+    # Locked read-modify-write shared with the door proxy (lib/door_state.py).
+    local out
+    out=$(python3 "$TUNNEL_DIR/lib/door_state.py" extend "$state_file" "$minutes") || exit 1
+    if grep -q 'never' <<<"$out"; then
+        echo "$name never expires (bin/status expire $name 1h to put it back on a timer)"
+    else
+        echo "Extended $name by ${minutes}m ($out)"
+    fi
+}
+
+# ─── Keep / Expire ───────────────────────────────────────────────────────────
+
+door_state_file_or_die() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        echo "Usage: bin/status $2" >&2
+        exit 1
+    fi
+    if ! tunnel_name_is_valid "$name"; then
+        echo "Invalid tunnel name: $name" >&2
+        exit 1
+    fi
+    local state_file="${TUNNEL_STATE_DIR}/${name}.json"
+    if [ ! -f "$state_file" ]; then
+        echo "No tunnel found: $name" >&2
+        exit 1
+    fi
+    printf '%s\n' "$state_file"
+}
+
+cmd_keep() {
+    local state_file
+    state_file=$(door_state_file_or_die "$1" "keep <name>") || exit 1
+    python3 "$TUNNEL_DIR/lib/door_state.py" keep "$state_file" >/dev/null || exit 1
+    echo "$1 will never expire (close it with: bin/status close $1)"
+}
+
+cmd_expire() {
+    local state_file
+    state_file=$(door_state_file_or_die "$1" "expire <name> <30m|2h|1d|ISO time|never>") || exit 1
+    if [ -z "$2" ]; then
+        echo "Usage: bin/status expire <name> <30m|2h|1d|ISO time|never>" >&2
+        exit 1
+    fi
+    local out
+    out=$(python3 "$TUNNEL_DIR/lib/door_state.py" expire "$state_file" "$2") || exit 1
+    echo "$1 $out"
+}
+
+# ─── Status (default) ───────────────────────────────────────────────────────
+
+cmd_status() {
+    local now
+    now=$(date +%s)
+
+    # ── frp Server ──
+    printf "${BOLD}=== frp Server ===${RESET}\n"
+    # Executable name + command line, not a loose `pkill -f`-style substring:
+    # a shell that mentions frps.toml is not the frp server.
+    local server_pid=""
+    local _p
+    for _p in $(pgrep -f "frps.toml" 2>/dev/null); do
+        [ "$_p" = "$$" ] && continue
+        case "$(ps -o comm= -p "$_p" 2>/dev/null)" in
+            frps) server_pid="$_p"; break ;;
+        esac
+    done
+    if [ -n "$server_pid" ]; then
+        printf "Status: ${GREEN}RUNNING${RESET} (PID: %s)\n" "$server_pid"
+        echo "Dashboard: http://127.0.0.1:7500"
+    else
+        printf "Status: ${RED}STOPPED${RESET}\n"
+    fi
+
+    echo ""
+    printf "${BOLD}=== Active Tunnels ===${RESET}\n"
+
+    # Collect tunnel entries: "started|name|type|url|uptime|expires_display|log_path"
+    local entries=()
+    local dead_count=0
+
+    # ── Read managed tunnels from state files ──
+    if [ -d "$TUNNEL_STATE_DIR" ]; then
+        for state_file in "$TUNNEL_STATE_DIR"/*.json; do
+            [ -f "$state_file" ] || continue
+
+            local info
+            info=$(read_state_file "$state_file")
+            [ -z "$info" ] && continue
+
+            local name type pid port started expires keep_alive daemonized log_path
+            name=$(echo "$info" | sed -n '1p')
+            type=$(echo "$info" | sed -n '2p')
+            pid=$(echo "$info" | sed -n '3p')
+            port=$(echo "$info" | sed -n '4p')
+            started=$(echo "$info" | sed -n '5p')
+            expires=$(echo "$info" | sed -n '6p')
+            keep_alive=$(echo "$info" | sed -n '7p')
+            daemonized=$(echo "$info" | sed -n '8p')
+            log_path=$(echo "$info" | sed -n '9p')
+
+            # Check if PID is alive
+            if ! kill -0 "$pid" 2>/dev/null; then
+                rm -f "$state_file"
+                dead_count=$((dead_count + 1))
+                continue
+            fi
+
+            local url="https://${name}.${PORCH_TUNNEL_BASE}"
+            local uptime_str
+            uptime_str=$(format_duration $((now - started)))
+
+            local expires_str door_info door_opens door_rules
+            door_info=$(python3 "$TUNNEL_DIR/lib/door_state.py" describe "$state_file" 2>/dev/null)
+            door_opens=$(echo "$door_info" | cut -d'|' -f2)
+            door_rules=$(echo "$door_info" | cut -d'|' -f3)
+            if [ "$keep_alive" = "true" ]; then
+                expires_str="never"
+            else
+                local remaining=$((expires - now))
+                if [ "$remaining" -le 0 ]; then
+                    expires_str="${RED}EXPIRED${RESET}"
+                elif [ "$remaining" -le 600 ]; then
+                    expires_str="${YELLOW}$(format_duration $remaining) left${RESET}"
+                else
+                    expires_str="$(format_duration $remaining) left"
+                fi
+                expires_str="${expires_str} ${DIM}(at $(date -d "@$expires" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$expires" '+%Y-%m-%d %H:%M' 2>/dev/null))${RESET}"
+            fi
+            if [ -n "$door_rules" ] && [ "$door_rules" != "none" ]; then
+                log_path="rules: ${door_rules} · opens: ${door_opens:-0}${log_path:+ · log: $log_path}"
+            fi
+
+            local type_display="$type"
+            if [ "$daemonized" = "true" ]; then
+                type_display="${type} (bg)"
+            fi
+
+            entries+=("${started}|${name}|${type_display}|${url}|${uptime_str}|${expires_str}|${log_path}")
+        done
+    fi
+
+    # ── Scan for unmanaged frpc processes ──
+    local managed_names=""
+    if [ -d "$TUNNEL_STATE_DIR" ]; then
+        for f in "$TUNNEL_STATE_DIR"/*.json; do
+            [ -f "$f" ] || continue
+            managed_names="$managed_names $(basename "$f" .json)"
+        done
+    fi
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        # "$line" is "<pid> <argv...>" for a process actually named frpc.
+        # Extract the proxy name from frpc command line using a portable awk pattern.
+        # Matches config file pattern: frpc-<name>-XXXXX.toml
+        # Avoids grep -oP (PCRE \K / lookahead) — BSD grep on macOS lacks both.
+        local proxy_name=""
+        proxy_name=$(printf '%s\n' "$line" | awk '{
+            for (i = 1; i <= NF; i++) {
+                if (match($i, /frpc-[^-]+-[A-Za-z0-9]+\.toml/)) {
+                    s = substr($i, RSTART, RLENGTH)
+                    # strip leading "frpc-" and trailing "-XXXXX.toml"
+                    sub(/^.*frpc-/, "", s)
+                    sub(/-[A-Za-z0-9]+\.toml$/, "", s)
+                    print s
+                    exit
+                }
+            }
+        }')
+        [ -z "$proxy_name" ] && continue
+
+        # Skip if already managed
+        if echo "$managed_names" | grep -qw "$proxy_name"; then
+            continue
+        fi
+
+        local frpc_pid
+        frpc_pid=$(echo "$line" | awk '{print $1}')
+        local url="https://${proxy_name}.${PORCH_TUNNEL_BASE}"
+
+        # Start time via `ps -o etime=` (see proc_started): macOS has no
+        # /proc, and `stat` flags differ between GNU (-c '%Y') and BSD (-f '%m').
+        local started_ts=""
+        if [ -n "$frpc_pid" ]; then
+            started_ts=$(proc_started "$frpc_pid")
+        fi
+        local uptime_str="unknown"
+        if [ -n "$started_ts" ]; then
+            uptime_str=$(format_duration $((now - started_ts)))
+        fi
+
+        entries+=("${started_ts:-0}|${proxy_name}|${DIM}unmanaged${RESET}|${url}|${uptime_str}|${DIM}--${RESET}|")
+    done < <(for _p in $(pgrep -x frpc 2>/dev/null); do
+                 printf '%s %s\n' "$_p" "$(proc_cmdline "$_p")"
+             done)
+
+    # ── Display ──
+    if [ ${#entries[@]} -eq 0 ]; then
+        echo "  (none)"
+    else
+        # Sort by started time (newest first)
+        IFS=$'\n' sorted=($(for e in "${entries[@]}"; do echo "$e"; done | sort -t'|' -k1 -rn))
+        unset IFS
+
+        # Header
+        printf "  ${BOLD}%-20s %-14s %-43s %-10s %s${RESET}\n" "NAME" "TYPE" "URL" "UPTIME" "EXPIRES"
+
+        for entry in "${sorted[@]}"; do
+            local name type url uptime_str expires_str log_path
+            name=$(echo "$entry" | cut -d'|' -f2)
+            type=$(echo "$entry" | cut -d'|' -f3)
+            url=$(echo "$entry" | cut -d'|' -f4)
+            uptime_str=$(echo "$entry" | cut -d'|' -f5)
+            expires_str=$(echo "$entry" | cut -d'|' -f6)
+            log_path=$(echo "$entry" | cut -d'|' -f7)
+
+            printf "  %-20s %-14b %-43s %-10s %b\n" "$name" "$type" "$url" "$uptime_str" "$expires_str"
+            if [ -n "$log_path" ]; then
+                case "$log_path" in
+                    "rules: "*) printf "  ${DIM}%s${RESET}\n" "$log_path" ;;
+                    *) printf "  ${DIM}log: %s${RESET}\n" "$log_path" ;;
+                esac
+            fi
+        done
+
+        echo ""
+        echo "${#entries[@]} active tunnel(s)"
+    fi
+
+    if [ "$dead_count" -gt 0 ]; then
+        printf "${DIM}(cleaned up %s stale state file(s))${RESET}\n" "$dead_count"
+    fi
+}
+
+# ─── Dispatch ────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    close)
+        if [ "$2" = "all" ] || [ "$2" = "-all" ]; then
+            cmd_close_all
+        else
+            cmd_close "$2"
+        fi
+        ;;
+    close-all)
+        cmd_close_all
+        ;;
+    extend)
+        cmd_extend "$2" "$3"
+        ;;
+    keep)
+        cmd_keep "$2"
+        ;;
+    expire)
+        cmd_expire "$2" "$3"
+        ;;
+    "")
+        cmd_status
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo ""
+        show_help
+        ;;
+esac

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# issue-cert — Issue/renew a Let's Encrypt cert for a single cush.rocks subdomain
+# using certbot standalone HTTP-01 (HAProxy routes /.well-known/acme-challenge/
+# to the certbot listener on :9785), then combine into the HAProxy SNI PEM dir
+# and reload HAProxy.
+#
+# Usage: issue-cert <fqdn> [<fqdn> ...]
+# Example: issue-cert grab.cush.rocks auth.cush.rocks
+
+PEM_DIR="/etc/ssl/ssl-certs/cush.rocks"
+ACME_PORT=9785
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: issue-cert <fqdn> [<fqdn> ...]" >&2
+  exit 2
+fi
+
+for DOMAIN in "$@"; do
+  # $DOMAIN ends up inside a root shell command below and names a file under
+  # $PEM_DIR. Only accept something that is actually a hostname.
+  if ! [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+    echo "issue-cert: refusing non-hostname argument: ${DOMAIN}" >&2
+    exit 2
+  fi
+
+  echo "=== Issuing cert for ${DOMAIN} ==="
+  sudo certbot certonly --standalone --preferred-challenges http \
+    --http-01-port "${ACME_PORT}" \
+    -d "${DOMAIN}" \
+    --agree-tos --no-eff-email --non-interactive --keep-until-expiring
+
+  CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
+  PEM_FILE="${PEM_DIR}/${DOMAIN}.pem"
+  echo "Combining fullchain + privkey -> ${PEM_FILE}"
+  # Paths go in as arguments, not spliced into the text of a root shell.
+  # umask 077 so the private half is never briefly world-readable; chmod
+  # afterwards makes the mode explicit on an already-existing file too.
+  sudo sh -c 'umask 077; cat "$1/fullchain.pem" "$1/privkey.pem" > "$2"' _ \
+    "${CERT_DIR}" "${PEM_FILE}"
+  sudo chmod 600 "${PEM_FILE}"
+done
+
+echo "Reloading HAProxy..."
+sudo systemctl reload haproxy
+echo "=== Done: $* ==="

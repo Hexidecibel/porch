@@ -1,0 +1,21 @@
+#!/bin/bash
+# Porch relay uninstaller: removes only what install-relay.sh recorded in
+# /etc/porch-relay/installed. Never touches ssh or anything else.
+set -uo pipefail
+DIR=/etc/porch-relay
+[ -f "$$DIR/installed" ] || { echo "PORCH_RELAY_ABSENT"; exit 0; }
+systemctl disable --now porch-relay-frps.service 2>/dev/null
+rm -f /etc/systemd/system/porch-relay-frps.service
+systemctl daemon-reload
+save=0
+while read -r kind arg; do
+  case "$$kind" in
+    ufw) ufw delete allow "$$arg/tcp" >/dev/null ;;
+    iptables) iptables -D INPUT -p tcp --dport "$$arg" -m comment --comment porch-relay -j ACCEPT 2>/dev/null ;;
+    netfilter-persistent) save=1 ;;
+    file) case "$$arg" in /usr/local/bin/porch-relay-*|/etc/porch-relay/*) rm -f "$$arg" ;; esac ;;
+  esac
+done < "$$DIR/installed"
+[ "$$save" = 1 ] && netfilter-persistent save
+rm -rf "$$DIR"
+echo "PORCH_RELAY_REMOVED"

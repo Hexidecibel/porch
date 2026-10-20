@@ -1,0 +1,42 @@
+# Porch relay client (porch connect ${mode}), rendered by lib/porch_setup/relay/common.py.
+# 0600: it holds the relay token. The relay's tcp 80, 443 and ${frp_port} come
+# back here; 80/443 carry a PROXY v2 header into HAProxy's accept-proxy binds
+# so client addresses survive. TLS still terminates at home.
+serverAddr = "${relay_ip}"
+serverPort = ${control_port}
+loginFailExit = false
+auth.method = "token"
+auth.token = "${token}"
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+
+webServer.addr = "127.0.0.1"
+webServer.port = ${admin_port}
+webServer.user = "porch"
+webServer.password = "${admin_password}"
+
+log.to = "console"
+log.level = "info"
+
+[[proxies]]
+name = "porch-relay-http"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = ${relay_http_port}
+remotePort = 80
+transport.proxyProtocolVersion = "v2"
+
+[[proxies]]
+name = "porch-relay-https"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = ${relay_https_port}
+remotePort = 443
+transport.proxyProtocolVersion = "v2"
+
+[[proxies]]
+name = "porch-relay-frp"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = ${frp_port}
+remotePort = ${frp_port}

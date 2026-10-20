@@ -1,0 +1,83 @@
+#!/bin/bash
+# Start the frp server and the status API (the panel host, e.g. panel.cush.rocks).
+# Usage: bin/start-server [--restart-frps] [--restart-status]
+#   --restart-frps    validate config/frps.toml (frps verify), then restart frps;
+#                     frpc clients reconnect on their own within seconds
+#   --restart-status  stop a running status API first, so it picks up new code
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+mkdir -p "$TUNNEL_DIR/logs"
+
+# Liveness checks match on executable name + command line (see cush_pids_for).
+# `pgrep -f "statusserver.py"` on its own also matches any shell that mentions
+# it, which made "already running" report true when nothing was running.
+frps_running()   { [ -n "$(cush_pids_for 'frps' 'frps.toml')" ]; }
+frps_pids()      { cush_pids_for 'frps' 'frps.toml' | tr '\n' ' '; }
+status_running() { [ -n "$(cush_pids_for 'python*' 'statusserver.py')" ]; }
+status_pids()    { cush_pids_for 'python*' 'statusserver.py' | tr '\n' ' '; }
+
+# frps serves <name>.<subDomainHost>; it has to agree with the Porch config.
+frps_sub="$(sed -n 's/^subDomainHost[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$TUNNEL_DIR/config/frps.toml" 2>/dev/null | head -1)"
+if [ -n "$frps_sub" ] && [ "$frps_sub" != "$PORCH_TUNNEL_BASE" ]; then
+  echo "Warning: config/frps.toml subDomainHost is $frps_sub but the Porch tunnel base is $PORCH_TUNNEL_BASE" >&2
+fi
+
+RESTART_FRPS=""; RESTART_STATUS=""
+for a in "$@"; do
+  case "$a" in
+    --restart-frps) RESTART_FRPS=1 ;;
+    --restart-status) RESTART_STATUS=1 ;;
+    *) echo "unknown argument: $a" >&2; exit 2 ;;
+  esac
+done
+
+if [ -n "$RESTART_FRPS" ] && frps_running; then
+  if ! "$TUNNEL_DIR/bin/frps" verify -c "$TUNNEL_DIR/config/frps.toml"; then
+    echo "config/frps.toml failed frps verify; frps left running unchanged" >&2
+    exit 1
+  fi
+  echo "Stopping frps (PID: $(frps_pids))"
+  kill $(frps_pids)
+  for _ in 1 2 3 4 5; do frps_running || break; sleep 1; done
+  if frps_running; then echo "frps did not stop"; exit 1; fi
+fi
+
+# Start frps if it isn't already running. (Don't exit early — the status API
+# below must be (re)started regardless of frps's state.)
+if frps_running; then
+  echo "frps is already running (PID: $(frps_pids))"
+else
+  echo "Starting frps..."
+  nohup "$TUNNEL_DIR/bin/frps" -c "$TUNNEL_DIR/config/frps.toml" > "$TUNNEL_DIR/logs/frps.log" 2>&1 &
+  sleep 1
+
+  if frps_running; then
+    echo "frps started (PID: $(frps_pids))"
+    echo "Dashboard: http://127.0.0.1:7500 (credentials in config/frps.toml)"
+  else
+    echo "Failed to start frps. Check $TUNNEL_DIR/logs/frps.log"
+    exit 1
+  fi
+fi
+
+# Start status API server
+if [ -n "$RESTART_STATUS" ] && status_running; then
+  echo "Stopping status API (PID: $(status_pids))"
+  kill $(status_pids)
+  for _ in 1 2 3 4 5; do status_running || break; sleep 1; done
+  if status_running; then echo "Status API did not stop"; exit 1; fi
+fi
+if status_running; then
+  echo "Status API already running (PID: $(status_pids))"
+else
+  mkdir -p /tmp/tunnel-state
+  nohup python3 "$TUNNEL_DIR/lib/statusserver.py" --port 9471 --state-dir /tmp/tunnel-state \
+    --devices "$TUNNEL_DIR/data/devices.json" --history "$TUNNEL_DIR/data/history.jsonl" \
+    > "$TUNNEL_DIR/logs/statusserver.log" 2>&1 &
+  sleep 1
+  if status_running; then
+    echo "Status API started (PID: $(status_pids))"
+  else
+    echo "Failed to start status API. Check $TUNNEL_DIR/logs/statusserver.log"
+  fi
+fi

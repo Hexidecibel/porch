@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>porch</title>
+<meta name="description" content="Your front door on the internet.">
+<!--PORCH_CSS-->
+<style>
+  /* Tokens, fonts and the chip come from porch.css, which bin/deploy writes to
+     /var/www/tunnel/__porch-assets/ and links in place of the comment above. */
+  html,body{width:100%;height:100%;overflow:hidden;background:#121014;color:#F3ECE4}
+  canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%}
+  #brand{
+    position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;
+    width:min(560px,calc(100% - 32px));
+    display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;
+    pointer-events:none;
+  }
+  #brand .mark{color:#F3ECE4}
+  #brand .mark .light{fill:#F5A524}
+  #brand h1{
+    font-family:"Bricolage Grotesque",ui-sans-serif,system-ui,sans-serif;
+    font-weight:700;letter-spacing:-.02em;line-height:1;
+    font-size:clamp(44px,11vw,72px);color:#F3ECE4;
+  }
+  #brand p{font:400 clamp(15px,2.4vw,18px)/1.5 Geist,ui-sans-serif,system-ui,sans-serif;color:#A79E95}
+  #hint{margin-top:18px;font:400 12px Geist,ui-sans-serif,system-ui,sans-serif;color:#A79E95}
+  #adminBtn{
+    position:fixed;right:16px;bottom:16px;z-index:20;
+    display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:0 12px;
+    border-radius:999px;border:1px solid rgba(255,240,220,.14);background:#1B181E;
+    color:#A79E95;font:500 12px/1 Geist,ui-sans-serif,system-ui,sans-serif;text-decoration:none;
+    opacity:.7;transition:opacity .2s ease,color .2s ease;
+  }
+  #adminBtn::before{content:"";width:7px;height:7px;border-radius:50%;background:#F5A524}
+  #adminBtn:hover,#adminBtn:focus-visible{opacity:1;color:#F3ECE4}
+  #adminBtn:focus-visible{outline:2px solid #F5A524;outline-offset:2px}
+  @media (prefers-reduced-motion:reduce){#hint{display:none}}
+</style>
+</head>
+<body>
+<a id="adminBtn" href="https://panel.cush.rocks" rel="noopener">Admin</a>
+<div id="brand">
+  <svg class="mark" width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+    <circle class="light" cx="32" cy="22" r="14" opacity="0.18"/>
+    <path d="M8 30 L32 10 L56 30" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M16 28 V54 H48 V28" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M27 54 V40 H37 V54" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/>
+    <circle class="light" cx="32" cy="22" r="4"/>
+  </svg>
+  <h1>porch</h1>
+  <p>Your front door on the internet.</p>
+  <div id="hint">scroll to walk in · scroll up to step back</div>
+</div>
+<canvas id="c"></canvas>
+<script>
+(function(){
+  const canvas=document.getElementById('c');
+  const ctx=canvas.getContext('2d');
+  let W,H,cx,cy;
+  let glowCanvas,glowCtx,vignetteCanvas,vignetteCtx;
+
+  function resize(){
+    W=canvas.width=window.innerWidth;
+    H=canvas.height=window.innerHeight;
+    cx=W/2;cy=H/2;
+    // Scale factor so tunnel fills wide screens
+    viewScale=Math.max(W,H)/800;
+
+    // Cache radial center glow
+    glowCanvas=document.createElement('canvas');
+    glowCanvas.width=W;glowCanvas.height=H;
+    glowCtx=glowCanvas.getContext('2d');
+    const grad=glowCtx.createRadialGradient(cx,cy,0,cx,cy,Math.min(W,H)*0.5);
+    grad.addColorStop(0,'rgba(245,165,36,.07)');
+    grad.addColorStop(1,'transparent');
+    glowCtx.fillStyle=grad;
+    glowCtx.fillRect(0,0,W,H);
+
+    // Cache vignette
+    vignetteCanvas=document.createElement('canvas');
+    vignetteCanvas.width=W;vignetteCanvas.height=H;
+    vignetteCtx=vignetteCanvas.getContext('2d');
+    const vig=vignetteCtx.createRadialGradient(cx,cy,Math.min(W,H)*0.3,cx,cy,Math.max(W,H)*0.75);
+    vig.addColorStop(0,'transparent');
+    vig.addColorStop(1,'rgba(18,16,20,.75)');
+    vignetteCtx.fillStyle=vig;
+    vignetteCtx.fillRect(0,0,W,H);
+  }
+  let viewScale=1;
+  window.addEventListener('resize',resize);
+  resize();
+
+  // --- Config ---
+  const RING_COUNT=40;
+  const PARTICLE_COUNT=120;
+  const BASE_SPEED=0.3;       // auto-drift speed
+  const SCROLL_MULT=2.5;      // scroll acceleration
+  const MAX_DEPTH=1200;
+
+  // --- Color cycle ---
+  function hueAt(depth){
+    // porch light: a slow swing between ember (18) and amber (46) and back
+    const t=((depth%MAX_DEPTH)+MAX_DEPTH)%MAX_DEPTH;
+    const phase=t/MAX_DEPTH;
+    return 18+28*(0.5-0.5*Math.cos(phase*Math.PI*2));
+  }
+
+  // --- Rings ---
+  class Ring{
+    constructor(z){
+      this.reset(z);
+    }
+    reset(z){
+      this.z=z!==undefined?z:MAX_DEPTH;
+      this.rotation=Math.random()*Math.PI*2;
+      this.rotSpeed=(Math.random()-.5)*.008;
+      this.segments=Math.random()<.4?0:Math.floor(Math.random()*8+6); // 0=solid
+      this.dashRatio=Math.random()*.4+.4;
+      this.sides=Math.random()<.35?6:0; // 0=circle, 6=hexagon
+      this.baseRadius=(Math.random()*80+180)*viewScale;
+    }
+  }
+
+  // --- Particles ---
+  class Particle{
+    constructor(){
+      this.reset(true);
+    }
+    reset(randomZ){
+      const angle=Math.random()*Math.PI*2;
+      const dist=(Math.random()*400+50)*viewScale;
+      this.ox=Math.cos(angle)*dist;
+      this.oy=Math.sin(angle)*dist;
+      this.z=randomZ?Math.random()*MAX_DEPTH:MAX_DEPTH;
+      this.size=Math.random()*1.5+.5;
+    }
+  }
+
+  const rings=[];
+  for(let i=0;i<RING_COUNT;i++){
+    rings.push(new Ring(i*(MAX_DEPTH/RING_COUNT)));
+  }
+
+  const particles=[];
+  for(let i=0;i<PARTICLE_COUNT;i++){
+    particles.push(new Particle());
+  }
+
+  // --- Scroll velocity (signed: positive=forward, negative=reverse) ---
+  let scrollVel=0;
+  let touchY=null;
+
+  window.addEventListener('wheel',function(e){
+    e.preventDefault();
+    // deltaY > 0 = scroll down = forward; deltaY < 0 = scroll up = reverse
+    scrollVel+=e.deltaY*0.015;
+    scrollVel=Math.max(-8,Math.min(8,scrollVel));
+  },{passive:false});
+
+  window.addEventListener('touchstart',function(e){
+    touchY=e.touches[0].clientY;
+  },{passive:true});
+  window.addEventListener('touchmove',function(e){
+    if(touchY!==null){
+      const dy=touchY-e.touches[0].clientY; // positive = swipe up = forward
+      touchY=e.touches[0].clientY;
+      scrollVel+=dy*0.03;
+      scrollVel=Math.max(-8,Math.min(8,scrollVel));
+    }
+  },{passive:true});
+  window.addEventListener('touchend',function(){touchY=null},{passive:true});
+
+  // --- Drawing helpers ---
+  function projectScale(z){
+    const perspective=600*viewScale;
+    const s=perspective/(z+perspective);
+    return s;
+  }
+
+  function drawHexagon(x,y,radius,rotation){
+    ctx.beginPath();
+    for(let i=0;i<6;i++){
+      const a=rotation+i*Math.PI/3;
+      const px=x+Math.cos(a)*radius;
+      const py=y+Math.sin(a)*radius;
+      if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);
+    }
+    ctx.closePath();
+  }
+
+  function drawSegmentedCircle(x,y,radius,rotation,segments,dashRatio){
+    const step=Math.PI*2/segments;
+    const arc=step*dashRatio;
+    for(let i=0;i<segments;i++){
+      const startA=rotation+i*step;
+      ctx.beginPath();
+      ctx.arc(x,y,radius,startA,startA+arc);
+      ctx.stroke();
+    }
+  }
+
+  function drawSegmentedHexagon(x,y,radius,rotation,segments,dashRatio){
+    // draw dashed hexagon by drawing partial sides
+    const points=[];
+    for(let i=0;i<6;i++){
+      const a=rotation+i*Math.PI/3;
+      points.push({x:x+Math.cos(a)*radius,y:y+Math.sin(a)*radius});
+    }
+    // total perimeter segments
+    const totalSegs=segments;
+    const segLen=1/totalSegs;
+    const drawLen=segLen*dashRatio;
+    for(let i=0;i<totalSegs;i++){
+      const t0=i*segLen;
+      const t1=t0+drawLen;
+      const p0=hexPoint(points,t0);
+      const p1=hexPoint(points,t1);
+      ctx.beginPath();
+      ctx.moveTo(p0.x,p0.y);
+      ctx.lineTo(p1.x,p1.y);
+      ctx.stroke();
+    }
+  }
+
+  function hexPoint(pts,t){
+    // t in [0,1] around the hexagon
+    const total=6;
+    const idx=Math.floor(t*total)%total;
+    const frac=(t*total)%1;
+    const a=pts[idx];
+    const b=pts[(idx+1)%total];
+    return{x:a.x+(b.x-a.x)*frac,y:a.y+(b.y-a.y)*frac};
+  }
+
+  // --- Global depth tracker for color cycling ---
+  let globalDepth=0;
+
+  // --- Ring click detection ---
+  let frameRings=[];
+
+  function handleRingClick(hit){
+    // Clicks produce a glow but no longer gate anything.
+    hit.ring.glowUntil=performance.now()+400;
+  }
+
+
+
+  canvas.addEventListener('click',function(e){
+    const mx=e.clientX;
+    const my=e.clientY;
+    const dist=Math.sqrt((mx-cx)*(mx-cx)+(my-cy)*(my-cy));
+    const sorted=frameRings.slice().sort(function(a,b){return a.z-b.z});
+    for(let i=0;i<sorted.length;i++){
+      const ring=sorted[i];
+      const threshold=Math.max(15,ring.radius*0.15);
+      if(Math.abs(dist-ring.radius)<threshold&&ring.radius>5){
+        handleRingClick(ring);
+        break;
+      }
+    }
+  });
+
+  // --- Animation loop ---
+  let lastTime=-1;
+  function frame(time){
+    if(lastTime<0)lastTime=time;
+    const dt=Math.min(time-lastTime,50)/16.667; // normalize to ~60fps
+    lastTime=time;
+
+    // Scroll decay toward zero (gradual return to forward drift)
+    scrollVel*=0.94;
+    if(Math.abs(scrollVel)<0.01)scrollVel=0;
+    const speed=(BASE_SPEED+scrollVel*SCROLL_MULT)*dt;
+
+    globalDepth+=speed;
+
+    // Clear
+    ctx.fillStyle='#121014';
+    ctx.fillRect(0,0,W,H);
+
+    // Subtle radial glow in center (cached)
+    ctx.drawImage(glowCanvas,0,0);
+
+    // Update and draw rings
+    frameRings=[];
+    for(let i=0;i<rings.length;i++){
+      const r=rings[i];
+      r.z-=speed*3;
+      r.rotation+=r.rotSpeed*dt;
+
+      if(r.z<-50){
+        r.reset();          // flew past camera -> send to back
+      }else if(r.z>MAX_DEPTH+50){
+        r.reset(0);         // reversed past far end -> bring to front
+      }
+
+      const s=projectScale(r.z);
+      if(s<=0||s>20)continue;
+      const radius=r.baseRadius*s;
+      if(radius<2)continue;
+
+      const hue=hueAt(globalDepth*3+r.z);
+      const alpha=Math.min(1,Math.max(0,(1-r.z/MAX_DEPTH)))*0.7;
+      const glowAlpha=alpha*0.4;
+
+      // Glow layer (wide transparent stroke, no shadowBlur)
+      ctx.strokeStyle=`hsla(${hue|0},80%,60%,${glowAlpha})`;
+      ctx.lineWidth=Math.max(2,8*s);
+
+      if(r.sides===6){
+        if(r.segments>0){
+          drawSegmentedHexagon(cx,cy,radius,r.rotation,r.segments,r.dashRatio);
+        }else{
+          drawHexagon(cx,cy,radius,r.rotation);
+          ctx.stroke();
+        }
+      }else{
+        if(r.segments>0){
+          drawSegmentedCircle(cx,cy,radius,r.rotation,r.segments,r.dashRatio);
+        }else{
+          ctx.beginPath();
+          ctx.arc(cx,cy,radius,0,Math.PI*2);
+          ctx.stroke();
+        }
+      }
+
+      // Sharp inner stroke
+      ctx.strokeStyle=`hsla(${hue|0},70%,70%,${alpha})`;
+      ctx.lineWidth=Math.max(.5,1.5*s);
+      if(r.sides===6){
+        if(r.segments>0){
+          drawSegmentedHexagon(cx,cy,radius,r.rotation,r.segments,r.dashRatio);
+        }else{
+          drawHexagon(cx,cy,radius,r.rotation);
+          ctx.stroke();
+        }
+      }else{
+        if(r.segments>0){
+          drawSegmentedCircle(cx,cy,radius,r.rotation,r.segments,r.dashRatio);
+        }else{
+          ctx.beginPath();
+          ctx.arc(cx,cy,radius,0,Math.PI*2);
+          ctx.stroke();
+        }
+      }
+
+      // Click glow effect
+      if(r.glowUntil&&r.glowUntil>performance.now()){
+        ctx.strokeStyle=`hsla(${hue|0},90%,80%,${Math.min(1,alpha*2)})`;
+        ctx.lineWidth=Math.max(3,12*s);
+        if(r.sides===6){
+          drawHexagon(cx,cy,radius,r.rotation);
+          ctx.stroke();
+        }else{
+          ctx.beginPath();
+          ctx.arc(cx,cy,radius,0,Math.PI*2);
+          ctx.stroke();
+        }
+      }
+
+      frameRings.push({ring:r,z:r.z,radius:radius,sides:r.sides});
+    }
+
+    // Particles
+    for(let i=0;i<particles.length;i++){
+      const p=particles[i];
+      p.z-=speed*4;
+      if(p.z<-20){
+        p.reset(false);       // flew past camera -> send to back
+      }else if(p.z>MAX_DEPTH+20){
+        p.z=0;                // reversed past far end -> bring to front
+      }
+      const s=projectScale(p.z);
+      if(s<=0)continue;
+      const px=cx+p.ox*s;
+      const py=cy+p.oy*s;
+      if(px<-10||px>W+10||py<-10||py>H+10)continue;
+      const size=p.size*s*2;
+      const alpha=Math.min(1,(1-p.z/MAX_DEPTH))*0.6;
+      const hue=hueAt(globalDepth*3+p.z);
+      ctx.fillStyle=`hsla(${hue|0},60%,75%,${alpha})`;
+      ctx.fillRect(px-size/2,py-size/2,size,size);
+    }
+
+    // Vignette (cached)
+    ctx.drawImage(vignetteCanvas,0,0);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# certbot-deploy-hook — rebuild the HAProxy combined PEM and reload HAProxy
+# after a certificate renews. Registered as `renew_hook` in a cert's renewal
+# config (notably the *.tunnel.cush.rocks wildcard, which renews via DNS-01
+# through certbot's own timer rather than the HTTP-01 batch renewer).
+#
+# certbot invokes this as root with RENEWED_LINEAGE pointing at the live dir,
+# e.g. /etc/letsencrypt/live/tunnel.cush.rocks
+#
+# The combined PEM keeps the same basename as the lineage, matching the
+# convention used by issue-cert / renew-cert / renew-all-certs.sh.
+
+PEM_DIR="/etc/ssl/ssl-certs/cush.rocks"
+LINEAGE="${RENEWED_LINEAGE:?RENEWED_LINEAGE not set — run via certbot --deploy-hook/renew_hook}"
+NAME="$(basename "$LINEAGE")"
+OUT="${PEM_DIR}/${NAME}.pem"
+
+echo "deploy-hook: rebuilding ${OUT} from ${LINEAGE}"
+# The combined PEM carries the PRIVATE KEY. HAProxy parses its crt directory
+# as root at config-load time (before dropping to user haproxy), so 0600 is
+# enough for it and keeps the key away from every other account on the box.
+# 0644 here is what left 59 private keys world-readable in ${PEM_DIR}.
+( umask 077; cat "${LINEAGE}/fullchain.pem" "${LINEAGE}/privkey.pem" > "${OUT}" )
+chmod 0600 "${OUT}"
+
+echo "deploy-hook: reloading HAProxy"
+systemctl reload haproxy --no-block 2>/dev/null \
+  || timeout 15s systemctl reload haproxy \
+  || timeout 15s systemctl restart haproxy
+
+echo "deploy-hook: done for ${NAME}"

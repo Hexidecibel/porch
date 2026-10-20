@@ -1,0 +1,12 @@
+#!/bin/bash
+# cush-tools auth server launcher.
+# Runs the stdlib Python HTTP server in lib/authserver.py on 127.0.0.1:9512.
+# Extra args (e.g. --port / --data overrides) are passed through.
+
+set -e
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$TUNNEL_DIR"
+mkdir -p "$TUNNEL_DIR/data" "$TUNNEL_DIR/logs"
+
+exec python3 "$TUNNEL_DIR/lib/authserver.py" --port 9512 --data "$TUNNEL_DIR/data" "$@"

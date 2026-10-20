@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -e
+
+# certbot-cleanup-hook — DNS-01 cleanup hook for *.tunnel.cush.rocks
+# Called by certbot as --manual-cleanup-hook. Finds and deletes the
+# _acme-challenge.tunnel TXT record from name.com DNS.
+
+# name.com API credentials: $NAMECOM_CREDENTIALS, else ~/.config/namecom/credentials.
+# certbot runs hooks as root (sudo, or its renewal timer), where ~ is /root, so
+# as root "~" is the home of the user who owns this checkout.
+_cred_home="$HOME"
+if [[ "$(id -u)" == 0 ]]; then
+    _owner="$(stat -c %U "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    _cred_home="$(getent passwd "$_owner" 2>/dev/null | cut -d: -f6)"
+    _cred_home="${_cred_home:-$HOME}"
+fi
+CREDENTIALS="${NAMECOM_CREDENTIALS:-$_cred_home/.config/namecom/credentials}"
+DOMAIN="cush.rocks"
+HOST="_acme-challenge.tunnel"
+API_BASE="https://api.name.com"
+
+# ── Load credentials ─────────────────────────────────────────────────
+if [[ ! -f "$CREDENTIALS" ]]; then
+  echo "ERROR: Credentials file not found at $CREDENTIALS" >&2
+  exit 1
+fi
+source "$CREDENTIALS"
+
+# ── Find the TXT record ID ──────────────────────────────────────────
+echo "Looking up TXT records for ${HOST}.${DOMAIN}..."
+
+RECORDS=$(curl -s \
+  -u "${NAMECOM_USER}:${NAMECOM_TOKEN}" \
+  "${API_BASE}/v4/domains/${DOMAIN}/records")
+
+# Extract record IDs for matching TXT records using jq
+# Match on host and type TXT
+RECORD_IDS=$(echo "$RECORDS" | jq -r \
+  ".records[] | select(.host == \"${HOST}\" and .type == \"TXT\") | .id")
+
+if [[ -z "$RECORD_IDS" ]]; then
+  echo "No TXT records found for ${HOST}.${DOMAIN} — nothing to clean up"
+  exit 0
+fi
+
+# ── Delete each matching record ──────────────────────────────────────
+for RECORD_ID in $RECORD_IDS; do
+  echo "Deleting record ID ${RECORD_ID}..."
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "${NAMECOM_USER}:${NAMECOM_TOKEN}" \
+    -X DELETE "${API_BASE}/v4/domains/${DOMAIN}/records/${RECORD_ID}")
+
+  if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+    echo "WARNING: Failed to delete record ${RECORD_ID} (HTTP ${HTTP_CODE})" >&2
+  else
+    echo "Deleted record ${RECORD_ID} (HTTP ${HTTP_CODE})"
+  fi
+done
+
+echo "Cleanup complete"

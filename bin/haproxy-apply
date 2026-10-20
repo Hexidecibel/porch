@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# haproxy-apply — install a candidate HAProxy config safely.
+#
+# Usage: bin/haproxy-apply <candidate.cfg> [--yes]
+#
+# Validates the candidate with `haproxy -c`, shows the diff against the live
+# /etc/haproxy/haproxy.cfg, backs the live file up to /etc/haproxy/backups/,
+# installs the candidate and reloads (graceful: open connections are kept).
+# If the reload fails or HAProxy is not active afterwards, the backup is put
+# back and HAProxy reloaded again.
+
+set -euo pipefail
+
+LIVE=/etc/haproxy/haproxy.cfg
+BACKUPS=/etc/haproxy/backups
+
+CAND="${1:-}"
+YES="${2:-}"
+if [[ -z "$CAND" || "$CAND" == -h || "$CAND" == --help ]]; then
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+fi
+[[ -f "$CAND" ]] || { echo "✗ no such file: $CAND" >&2; exit 2; }
+
+if sudo cmp -s "$CAND" "$LIVE"; then
+    echo "✓ candidate is identical to $LIVE; nothing to do"
+    exit 0
+fi
+
+echo "→ validating candidate"
+sudo haproxy -c -q -f "$CAND" || { echo "✗ candidate failed haproxy -c; live config untouched" >&2; exit 1; }
+
+echo "→ changes:"
+sudo diff -u "$LIVE" "$CAND" || true
+
+if [[ "$YES" != "--yes" ]]; then
+    read -r -p "Apply and reload? [y/N] " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
+fi
+
+TS="$(date +%Y%m%d-%H%M%S)"
+BACKUP="$BACKUPS/haproxy.cfg.$TS.bak"
+sudo mkdir -p "$BACKUPS"
+sudo cp -p "$LIVE" "$BACKUP"
+echo "→ backed up live config to $BACKUP"
+
+sudo install -m 644 -o root -g root "$CAND" "$LIVE"
+
+if sudo systemctl reload haproxy && sleep 1 && systemctl is-active --quiet haproxy; then
+    echo "✓ applied and reloaded (rollback: bin/haproxy-apply $BACKUP)"
+    exit 0
+fi
+
+echo "✗ reload failed; restoring $BACKUP" >&2
+sudo install -m 644 -o root -g root "$BACKUP" "$LIVE"
+sudo systemctl reload haproxy || sudo systemctl restart haproxy
+systemctl is-active --quiet haproxy && echo "✓ restored previous config" >&2
+exit 1

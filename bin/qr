@@ -1,0 +1,118 @@
+#!/bin/bash
+# Generate and share a QR code via tunnel
+# Usage: bin/qr <data> <name>
+#        bin/qr - <name>              (data read from stdin)
+#        bin/qr --data-file <path> <name>
+#        bin/qr --terminal <data>     (or --terminal - / --terminal --data-file <path>)
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$TUNNEL_DIR/lib/tunnel-state.sh"
+
+usage() {
+  echo "Usage: qr <data> <name>"
+  echo "       qr - <name>                   read the data from stdin"
+  echo "       qr --data-file <path> <name>  read the data from a file"
+  echo "       qr --terminal <data|-|--data-file path>"
+}
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  usage
+  echo ""
+  echo "Generate and share a QR code via tunnel."
+  echo ""
+  echo "Use '-' or --data-file for anything sensitive (Wi-Fi passwords, tokens):"
+  echo "data given as an argument is visible in ps and shell history."
+  echo ""
+  echo "Examples:"
+  echo "  qr 'https://example.com' myqr  -> QR at myqr.${PORCH_TUNNEL_BASE}"
+  echo "  printf 'WIFI:T:WPA;S:home;P:%s;;' \"\$PW\" | qr - wifi"
+  echo "  qr --terminal 'https://x.com'  -> print QR to terminal"
+  exit 0
+fi
+
+TERMINAL=""
+if [ "$1" = "--terminal" ]; then
+  TERMINAL=1
+  shift
+fi
+
+# Resolve the data source: '-' = stdin, --data-file <path>, else the argument.
+DATA_SET=""
+if [ "$1" = "-" ]; then
+  DATA="$(cat)"; DATA_SET=1; shift
+elif [ "$1" = "--data-file" ]; then
+  if [ -z "$2" ] || [ ! -r "$2" ]; then
+    echo "Error: --data-file needs a readable file" >&2
+    exit 1
+  fi
+  DATA="$(cat -- "$2")"; DATA_SET=1; shift 2
+elif [ -n "$1" ]; then
+  DATA="$1"; DATA_SET=1; shift
+fi
+
+if [ -z "$DATA_SET" ] || [ -z "$DATA" ]; then
+  usage >&2
+  exit 1
+fi
+
+# Fail before anything else (and, in tunnel mode, before a tunnel) when the
+# qrcode package is missing.
+if ! python3 -c "import qrcode" 2>/dev/null; then
+  echo "Missing dependency: pip install qrcode[pil]" >&2
+  exit 1
+fi
+
+# Terminal mode. The data goes to python on stdin, never argv.
+if [ -n "$TERMINAL" ]; then
+  printf '%s' "$DATA" | python3 -c "
+import sys
+import qrcode
+qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=2)
+qr.add_data(sys.stdin.read())
+qr.make(fit=True)
+qr.print_ascii(invert=True)
+"
+  exit $?
+fi
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  usage >&2
+  exit 1
+fi
+tunnel_require_valid_name "$NAME"
+
+# Auto-pick a free port
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+HTTP_PID=""
+
+cleanup() {
+  tunnel_state_cleanup "$NAME"
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null
+    wait "$HTTP_PID" 2>/dev/null
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Start QR server in the background. Data on stdin keeps it out of ps.
+printf '%s' "$DATA" | python3 "$TUNNEL_DIR/lib/qrserver.py" --port "$PORT" --data-file - --name "$NAME" &
+HTTP_PID=$!
+
+# Only bring the tunnel up once the server is actually listening.
+if ! wait_for_port "$PORT" || ! kill -0 "$HTTP_PID" 2>/dev/null; then
+  echo "Error: qrserver failed to start" >&2
+  exit 1
+fi
+
+tunnel_state_register "$NAME" "qr" $$ "$PORT"
+tunnel_state_watchdog "$NAME" &
+
+echo "QR Code: https://${NAME}.${PORCH_TUNNEL_BASE}"
+echo ""
+
+# Run tunnel in the foreground
+export TUNNEL_NO_STATE=1
+"$TUNNEL_DIR/bin/tunnel" "$PORT" "$NAME"

@@ -1344,3 +1344,9 @@ def contextlib_redirect():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdTests(unittest.TestCase):
+    def test_ids_never_look_like_options(self):
+        import pocket_core
+        self.assertFalse(any(pocket_core.new_id().startswith('-') for _ in range(5000)))

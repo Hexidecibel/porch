@@ -87,6 +87,15 @@ def device_hint(ua):
 
 # ---- clipboard store ---------------------------------------------------------
 
+
+def new_id(nbytes=9):
+    """A short random id that never starts with "-": `porch clip rm <id>` and
+    the like would read it as an option (1 in 64 token_urlsafe ids do)."""
+    while True:
+        rid = secrets.token_urlsafe(nbytes)
+        if not rid.startswith('-'):
+            return rid
+
 class ClipStore:
     """The clipboard: newest entry first; entries[0] is the current slot.
 
@@ -129,7 +138,7 @@ class ClipStore:
     def add(self, text, source):
         """Make `text` the current entry. An identical older entry moves up
         instead of being duplicated. Returns the entry."""
-        entry = {'id': secrets.token_urlsafe(9), 'text': text,
+        entry = {'id': new_id(), 'text': text,
                  'ts': round(time.time(), 3), 'source': source}
         with self.lock:
             self.entries = [entry] + [e for e in self.entries if e['text'] != text]
@@ -218,7 +227,7 @@ class KeyStore:
     def create(self, label):
         """(public entry + 'key', None), or (None, reason) when full."""
         key = SHARE_KEY_PREFIX + secrets.token_urlsafe(32)
-        entry = {'id': secrets.token_urlsafe(9), 'label': clean_label(label) or 'iPhone',
+        entry = {'id': new_id(), 'label': clean_label(label) or 'iPhone',
                  'sha256': _hash_key(key), 'created': round(time.time(), 3),
                  'last_used': None, 'uses': 0}
         with self.lock:

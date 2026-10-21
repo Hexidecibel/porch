@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# porch-hook v1
+# Pre-commit hook: blocks accidental commits of secret-bearing files,
+# and (if installed) runs `gitleaks protect` over staged changes.
+#
+# Install via: bin/porch-hooks-install (per-repo or --global)
+
+set -uo pipefail
+
+# Bypass file: each line is a glob pattern relative to repo root.
+# ~/.config/porch/hook-bypass; the pre-rename ~/.config/cush-tools/hook-bypass
+# is still read too.
+BYPASS_FILE="${HOME}/.config/porch/hook-bypass"
+LEGACY_BYPASS_FILE="${HOME}/.config/cush-tools/hook-bypass"
+
+# Read bypass patterns (if any) into an array.
+bypass_patterns=()
+for bf in "$BYPASS_FILE" "$LEGACY_BYPASS_FILE"; do
+  [ -f "$bf" ] || continue
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip blanks and comments.
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    bypass_patterns+=("$line")
+  done < "$bf"
+done
+
+# Returns 0 if $1 matches any bypass pattern.
+is_bypassed() {
+  local path="$1"
+  local pat
+  for pat in "${bypass_patterns[@]:-}"; do
+    [ -z "$pat" ] && continue
+    # shellcheck disable=SC2053
+    if [[ "$path" == $pat ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Returns 0 if $1 looks like a secret-bearing file we should block.
+is_secret_path() {
+  local path="$1"
+  local base
+  base="$(basename -- "$path")"
+
+  # Sidecar materialized dir anywhere in the path.
+  case "$path" in
+    *.cush-secrets.materialized/*) return 0 ;;
+  esac
+
+  # Exact .env
+  if [ "$base" = ".env" ]; then
+    return 0
+  fi
+
+  # .env.<suffix> — block unless suffix is a known placeholder.
+  if [[ "$base" == .env.* ]]; then
+    local suffix="${base#.env.}"
+    case "$suffix" in
+      example|sample|template|dist) return 1 ;;
+      *) return 0 ;;
+    esac
+  fi
+
+  # .envrc
+  if [ "$base" = ".envrc" ]; then
+    return 0
+  fi
+
+  # secrets.* / credentials / credentials.*
+  case "$base" in
+    secrets.env|secrets.yml|secrets.yaml|secrets.json|secrets.toml) return 0 ;;
+    credentials|credentials.env|credentials.json) return 0 ;;
+  esac
+
+  return 1
+}
+
+# Returns 0 if $1 is an .envrc-style file whose staged content is a
+# Porch-managed loader: it references `<porch dir>/bin/inject` (`porch/` or,
+# before the rename, `cush-tools/`), or carries the header bin/porch-init writes.
+# These files don't carry literal secret values — they just shell-out to
+# the injector — so they're safe to commit.
+is_porch_managed_envrc() {
+  local path="$1"
+  local base
+  base="$(basename -- "$path")"
+  case "$base" in
+    .envrc|.envrc.*) ;;
+    *) return 1 ;;
+  esac
+  local content
+  content="$(git show ":$path" 2>/dev/null)" || return 1
+  if printf '%s' "$content" | grep -qE '(^|/)(porch|cush-tools)/bin/inject( |$)'; then
+    return 0
+  fi
+  if printf '%s' "$content" | grep -q '^# Porch secrets loader' \
+     && printf '%s' "$content" | grep -qE '/bin/inject( |$)'; then
+    return 0
+  fi
+  return 1
+}
+
+# Collect staged files (added/copied/modified).
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)
+
+offenders=()
+for path in "${staged[@]:-}"; do
+  [ -z "$path" ] && continue
+  if is_secret_path "$path"; then
+    if is_bypassed "$path"; then
+      continue
+    fi
+    if is_porch_managed_envrc "$path"; then
+      continue
+    fi
+    offenders+=("$path")
+  fi
+done
+
+if [ "${#offenders[@]}" -gt 0 ]; then
+  {
+    echo "Blocked: tried to commit secret-bearing file(s):"
+    for p in "${offenders[@]}"; do
+      echo "  $p"
+    done
+    echo ""
+    echo "(.envrc files are allowed automatically when they are Porch loaders"
+    echo " that call <porch dir>/bin/inject, as bin/porch-init writes them.)"
+    echo ""
+    echo "Secrets belong in your secrets backend (bin/stash, bin/inject). To proceed:"
+    echo "  - If this file SHOULD be committed (e.g. it's a placeholder/example):"
+    echo "      git mv ${offenders[0]} ${offenders[0]}.example"
+    echo "      git add ${offenders[0]}.example && git commit"
+    echo "  - If you want to commit anyway (NOT RECOMMENDED):"
+    echo "      git commit --no-verify"
+    echo ""
+    echo "Bypass tip: see ~/.config/porch/hook-bypass for legitimate exceptions."
+  } >&2
+  exit 1
+fi
+
+# Optional: gitleaks scan of staged content.
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --redact -v >&2; then
+    {
+      echo ""
+      echo "Blocked: gitleaks detected potential secrets in staged changes (see above)."
+      echo "Output is redacted. To bypass (NOT RECOMMENDED): git commit --no-verify"
+    } >&2
+    exit 1
+  fi
+fi
+
+exit 0

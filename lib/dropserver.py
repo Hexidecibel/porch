@@ -366,7 +366,7 @@ class DropHandler(HardenedHandlerMixin, BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
     upload_dir = Path('.')
-    devices_path = ''           # cush-auth registry; owners may list + download
+    devices_path = ''           # porch-auth registry; owners may list + download
     max_file = MAX_FILE_SIZE
     max_total = DEFAULT_MAX_TOTAL_MB * 1024 * 1024
     max_files = MAX_FILES
@@ -818,7 +818,7 @@ def main():
     # on the LAN should be able to talk to the drop around the tunnel.
     parser.add_argument('--bind', type=str, default='127.0.0.1')
     parser.add_argument('--devices', type=str, default='',
-                        help='path to cush-auth devices.json; enrolled owner browsers '
+                        help='path to porch-auth devices.json; enrolled owner browsers '
                              'may list and download (nobody can without it)')
     parser.add_argument('--max-file-mb', type=int, default=MAX_FILE_SIZE // (1024 * 1024))
     parser.add_argument('--max-total-mb', type=int, default=DEFAULT_MAX_TOTAL_MB,
@@ -853,7 +853,7 @@ def main():
 
     server = make_server(DropHandler, args.port, args.bind, tag='dropserver',
                          max_connections=max(4, args.max_connections))
-    owner = 'owner list/download via cush-auth' if args.devices else \
+    owner = 'owner list/download via porch-auth' if args.devices else \
         'upload only (no --devices: nobody can list)'
     sys.stderr.write(f"[dropserver] Listening on {args.bind}:{args.port}, uploading to "
                      f"{upload_dir} [{owner}; cap {human_size(DropHandler.max_total)}]\n")

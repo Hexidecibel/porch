@@ -1017,7 +1017,7 @@ function tickCard(entry){
     entry.cd.textContent = 'no timer';
     entry.cd.className = 'cd none';
     entry.cd.setAttribute('aria-label', 'no expiry tracked');
-    entry.cdSub.textContent = 'not started by cush-tools';
+    entry.cdSub.textContent = 'not started by Porch';
     entry.meter.hidden = true;
     entry.node.setAttribute('data-urgency', 'none');
     return;
@@ -1844,7 +1844,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     reopener = None              # (name, expires) -> state; None = door_recipe.reopen
 
     # Don't advertise the Python version to unauthenticated callers.
-    server_version = 'cush-tools'
+    server_version = 'porch'
     sys_version = ''
     # A client that stops sending or reading frees its thread.
     timeout = REQUEST_TIMEOUT

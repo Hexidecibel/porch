@@ -4,7 +4,7 @@
 # Example: bin/pocket            -> pocket.tunnel.cush.rocks
 #          bin/pocket work --bg  -> work.tunnel.cush.rocks, daemonized
 #
-# Owner only: every page and API needs a browser enrolled with cush-auth
+# Owner only: every page and API needs a browser enrolled with porch-auth
 # (porch_host / cush_auth cookie checked against data/devices.json); anyone
 # else sees "Owner? Sign in" and nothing more. Installed as a PWA on Android it
 # appears in the share sheet; shared files land in ~/pocket/<name>/inbox/ and

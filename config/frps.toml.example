@@ -30,7 +30,7 @@ log.to = "/path/to/tunnel/logs/frps.log"
 log.level = "info"
 log.maxDays = 7
 
-# Per-device auth via cush-auth service (see lib/authserver.py)
+# Per-device auth via porch-auth service (see lib/authserver.py)
 #   Login        validates `device_token` metadata; auto-approves from 127.0.0.1
 #   NewProxy     remote devices may only open http/https proxies on a plain
 #                subdomain (no tcp/udp remote ports, no custom_domains, no

@@ -2,7 +2,7 @@
 #
 # haproxy-porch — apply the porch_host rollout steps to the live HAProxy config.
 #
-# Usage: bin/haproxy-porch a [--dry-run] [--yes]   route /__porch/ to cush-auth on every host
+# Usage: bin/haproxy-porch a [--dry-run] [--yes]   route /__porch/ to porch-auth on every host
 #        bin/haproxy-porch b [--dry-run] [--yes]   stop forwarding cush_auth to *.tunnel.cush.rocks
 #        bin/haproxy-porch c [--dry-run] [--yes]   honour public paths (cush-public*.map)
 #        bin/haproxy-porch d [--dry-run] [--yes]   Porch error pages + errorfile 429 (bin/haproxy-errors)

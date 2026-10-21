@@ -2,7 +2,7 @@
 # installing it to /etc/systemd/system/. A fresh `porch setup` installs its
 # own user units instead (config/templates/systemd/).
 [Unit]
-Description=cush-tools device auth server
+Description=Porch device auth server (legacy unit name; porch setup installs the porch-auth user unit)
 After=network.target
 
 [Service]

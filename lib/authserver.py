@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cush-tools auth server.
+Porch auth server.
 
 Provides per-device auth for frp:
   - /verify?op=Login       frps webhook; approves/rejects based on metas.device_token
@@ -81,7 +81,7 @@ HAPROXY_SOCK = "/run/haproxy/admin.sock"
 DEFAULT_PROTECTED_APPS = []
 
 # Known *.<root> app hostnames the panel offers protect toggles for (config
-# auth.known_apps). Private tools that are reasonable cush-auth targets (have an
+# auth.known_apps). Private tools that are reasonable porch-auth targets (have an
 # HAProxy backend + cert, no strong auth of their own). Shown as protect-toggles
 # in the admin panel and as per-device scope checkboxes.
 KNOWN_HOSTS = []
@@ -1840,7 +1840,7 @@ class AuthHandler(BaseHTTPRequestHandler):
     # Socket timeout per connection: a client that stops sending (or reading)
     # frees its thread instead of holding it forever.
     timeout = REQUEST_TIMEOUT
-    server_version = "cush-auth"
+    server_version = "porch-auth"
     sys_version = ""
 
     def log_message(self, format, *args):
@@ -2458,9 +2458,10 @@ class AuthHandler(BaseHTTPRequestHandler):
                     # If it's missing (server restarted, sweeper expired it), the
                     # token is unreachable — treat the pairing as expired.
                     server = STATE.get("server", {})
-                    server_addr = os.environ.get(
-                        "CUSH_SERVER_ADDR", server.get("addr", DEFAULT_SERVER["addr"])
-                    )
+                    # PORCH_SERVER_ADDR wins; CUSH_SERVER_ADDR is its old name.
+                    server_addr = (os.environ.get("PORCH_SERVER_ADDR")
+                                   or os.environ.get("CUSH_SERVER_ADDR")
+                                   or server.get("addr", DEFAULT_SERVER["addr"]))
                     server_port = int(server.get("port", DEFAULT_SERVER["port"]))
                     with PENDING_TOKENS_LOCK:
                         entry = PENDING_TOKENS.pop(poll_token, None)
@@ -4576,7 +4577,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
   function hapNote(res){
     var h=res&&res.body&&res.body.haproxy, m=el("hap-msg");
     if(typeof h==="string" && h.indexOf("failed")===0){
-      m.textContent="Saved, but HAProxy was not updated ("+h+"). The change is not live at the gate until the maps are pushed (SIGHUP cush-auth or reload HAProxy).";
+      m.textContent="Saved, but HAProxy was not updated ("+h+"). The change is not live at the gate until the maps are pushed (SIGHUP porch-auth or reload HAProxy).";
       m.classList.remove("hidden");
     } else if(h==="ok"){ m.classList.add("hidden"); }
     return res;
@@ -4993,7 +4994,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
   });
   el("inv-share").addEventListener("click",function(){
     if(!navigator.share) return;
-    navigator.share({title:"cush invite",url:el("inv-url").value}).catch(function(){});
+    navigator.share({title:"Invite",url:el("inv-url").value}).catch(function(){});
   });
   el("inv-done").addEventListener("click",function(){
     // Drop the one-time link from the DOM once the admin is done with it.
@@ -5432,7 +5433,7 @@ def initial_map_sync():
 def main():
     global DATA_DIR, DEVICES_PATH
 
-    parser = argparse.ArgumentParser(description="cush-tools auth server")
+    parser = argparse.ArgumentParser(description="Porch auth server")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--data", type=str, required=True, help="Data directory")
     parser.add_argument("--bind", type=str, default="127.0.0.1",

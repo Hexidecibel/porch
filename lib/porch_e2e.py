@@ -390,7 +390,7 @@ def _image_slug(v):
     return v
 
 
-def installer_cmd(flags=(), tarball=f"{INSTALL_UPLOAD}/cush-tools.tar.gz"):
+def installer_cmd(flags=(), tarball=f"{INSTALL_UPLOAD}/porch.tar.gz"):
     """site/porch.sh fed on stdin, as `curl ... | sudo sh -s -- <flags>` runs it."""
     return (f"PORCH_TARBALL={shlex.quote('file://' + tarball)} sh -s -- "
             + " ".join(shlex.quote(f) for f in flags)).rstrip()
@@ -630,7 +630,7 @@ class App:
 
     def build_tarball(self, out_dir):
         """bin/publish-tarball --out: the working tree's allowlisted files -> (tarball, sha256 file)."""
-        tb = os.path.join(out_dir, "cush-tools.tar.gz")
+        tb = os.path.join(out_dir, "porch.tar.gz")
         self.run([os.path.join(self.repo, "bin", "publish-tarball"), "--out", tb],
                  check=True, capture_output=True)
         return tb, tb + ".sha256"

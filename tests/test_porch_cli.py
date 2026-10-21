@@ -328,10 +328,10 @@ class DoorCliTest(unittest.TestCase):
             f.write(json.dumps({"event": "start", "name": "d1", "cwd": "/srv/my site",
                                 "cmd": ["/bin/bash", "/repo/bin/serve", "/srv/my site/dist",
                                         "d1"]}) + "\n")
-        old = os.environ.get("CUSH_HISTORY_FILE")
-        os.environ["CUSH_HISTORY_FILE"] = hist
-        self.addCleanup(lambda: os.environ.pop("CUSH_HISTORY_FILE") if old is None
-                        else os.environ.__setitem__("CUSH_HISTORY_FILE", old))
+        old = os.environ.get("PORCH_HISTORY_FILE")
+        os.environ["PORCH_HISTORY_FILE"] = hist
+        self.addCleanup(lambda: os.environ.pop("PORCH_HISTORY_FILE") if old is None
+                        else os.environ.__setitem__("PORCH_HISTORY_FILE", old))
         rc, _, err = self.run_door("rules", "d1", "--max-opens", "3")
         self.assertEqual(rc, 3)
         self.assertIn("bin/status close d1", err)

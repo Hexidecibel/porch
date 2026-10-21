@@ -26,7 +26,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
   echo ""
   echo "Start a file drop server and expose it via tunnel."
   echo "Anyone with the link can upload files to your machine. Only the owner"
-  echo "(a cush-auth-enrolled browser) can list or download them; a guest only"
+  echo "(a browser enrolled with porch-auth) can list or download them; a guest only"
   echo "sees what they just sent. Each drop holds at most 20GB / 5000 files and"
   echo "stops accepting uploads when the disk has under 1GB free."
   echo ""
@@ -82,7 +82,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Start drop server in the background. Loopback only: frpc is its one client.
-# --devices points at the cush-auth registry so the owner's enrolled browser
+# --devices points at the porch-auth registry so the owner's enrolled browser
 # can list + download; without a match nobody can (fail closed), and guests
 # can only add files.
 python3 "$TUNNEL_DIR/lib/dropserver.py" \

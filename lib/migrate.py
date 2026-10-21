@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backend migration orchestrator — `bin/cush-migrate-backend` delegates here.
+"""Backend migration orchestrator — `bin/porch-migrate-backend` delegates here.
 
 Walks a project's `.cush-secrets` manifest, reads every `op://` value from
 1Password, pushes it to Infisical at `inf://<env>/<project>/<KEY>`, and
@@ -21,11 +21,11 @@ suppressed with `--keep-orphans`. To clean up without doing a real
 migration, use `--clean-only`.
 
 This module is invokable two ways:
-  - As `python3 lib/migrate.py ...` from `bin/cush-migrate-backend`.
+  - As `python3 lib/migrate.py ...` from `bin/porch-migrate-backend`.
   - As an importable function for the `--self-test` mode (which patches
     the cush_secrets dispatch layer with an in-memory fake).
 
-Exit codes (mirroring bin/cush-migrate-backend):
+Exit codes (mirroring bin/porch-migrate-backend):
   0  ok / already migrated / clean-only ok
   2  argument or manifest error
   3  backend auth failure (op or inf)
@@ -70,7 +70,7 @@ def _load_secrets():
     return _secrets
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent  # cush-tools/
+REPO_ROOT = Path(__file__).resolve().parent.parent  # the repo root
 INJECT_BIN = REPO_ROOT / "bin" / "inject"
 
 
@@ -374,9 +374,9 @@ def _check_auth(plan: list, *, json_out: bool) -> int:
 
     hints = {
         "op": "1Password (`op`) is not authenticated. "
-              "Source ~/.config/cush-tools/op.env or run `eval $(op signin)`.",
+              "Source ~/.config/porch/op.env or run `eval $(op signin)`.",
         "inf": "Infisical is not authenticated. "
-              "Configure ~/.config/cush-tools/infisical.env (universal-auth).",
+              "Configure ~/.config/porch/infisical.env (universal-auth).",
     }
     if json_out:
         print(json.dumps({
@@ -1594,7 +1594,7 @@ SSH_KEY = { ref = "op://Cush/myapp/ssh", type = "ssh" }
 
 def _build_argparser():
     p = argparse.ArgumentParser(
-        prog="cush-migrate-backend",
+        prog="porch-migrate-backend",
         description="Migrate a project's .cush-secrets from op:// to inf://.",
     )
     p.add_argument("project_dir", nargs="?", default=None,

@@ -1,7 +1,8 @@
 # lib/infisical.sh — sourced shim for Infisical CLI integration
 # Usage: source "$(dirname "$0")/../lib/infisical.sh"
 #
-# Loads credentials from ~/.config/cush-tools/infisical.env (chmod 600) and
+# Loads credentials from ~/.config/porch/infisical.env (or the pre-rename
+# ~/.config/cush-tools/infisical.env; chmod 600) and
 # defines:
 #   - cush_infisical_check        verify infisical is usable; exit 3 on auth
 #                                 failure, 4 on other infisical errors
@@ -10,7 +11,7 @@
 #
 # Auth model (machine identity, universal-auth):
 #
-#   1. Read ~/.config/cush-tools/infisical.env which sets:
+#   1. Read ~/.config/porch/infisical.env which sets:
 #        - INFISICAL_PROJECT_ID
 #        - INFISICAL_UNIVERSAL_AUTH_CLIENT_ID
 #        - INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
@@ -28,7 +29,10 @@ if [ -n "${_CUSH_INFISICAL_SH_LOADED:-}" ]; then
 fi
 _CUSH_INFISICAL_SH_LOADED=1
 
-_CUSH_INFISICAL_ENV_FILE="${CUSH_INFISICAL_ENV_FILE:-$HOME/.config/cush-tools/infisical.env}"
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/porch-user-config.sh"
+# PORCH_INFISICAL_ENV_FILE wins; CUSH_INFISICAL_ENV_FILE is its old name.
+_CUSH_INFISICAL_ENV_FILE="${PORCH_INFISICAL_ENV_FILE:-${CUSH_INFISICAL_ENV_FILE:-$(porch_user_config_file infisical.env)}}"
 # Tracks whether we've already validated a token in this shell.
 _CUSH_INFISICAL_TOKEN_VALID=""
 
@@ -56,25 +60,25 @@ cush_infisical_setup_hint() {
 
 [Infisical setup needed]
 
-cush-tools needs to authenticate to Infisical. Use a machine identity with
+Porch needs to authenticate to Infisical. Use a machine identity with
 universal-auth:
 
   1. Install the CLI:
        https://infisical.com/docs/cli/overview
 
   2. Create a machine identity in your Infisical project, scoped to the
-     environments/paths cush-tools should access. Capture its
+     environments/paths Porch should access. Capture its
      CLIENT_ID and CLIENT_SECRET.
 
-  3. Drop credentials in ~/.config/cush-tools/infisical.env (chmod 600):
+  3. Drop credentials in ~/.config/porch/infisical.env (chmod 600):
 
-       mkdir -p ~/.config/cush-tools && chmod 700 ~/.config/cush-tools
-       cat > ~/.config/cush-tools/infisical.env <<'INFENV'
+       mkdir -p ~/.config/porch && chmod 700 ~/.config/porch
+       cat > ~/.config/porch/infisical.env <<'INFENV'
        export INFISICAL_PROJECT_ID=your_project_id_here
        export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=your_client_id_here
        export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=your_client_secret_here
        INFENV
-       chmod 600 ~/.config/cush-tools/infisical.env
+       chmod 600 ~/.config/porch/infisical.env
 
 After that, re-run your command.
 EOF

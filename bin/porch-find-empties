@@ -1,0 +1,66 @@
+#!/bin/bash
+# Porch: find empty / missing 1Password fields referenced from `.cush-secrets`.
+#
+# Walks one (or every) project's `.cush-secrets` manifest, runs `op read` for
+# each `op://` ref, and reports which fields are EMPTY / MISSING / ERROR in
+# 1Password. Designed to diagnose `bin/porch-migrate-backend` failures —
+# Infisical refuses to accept empty values, so a single empty field will
+# fail the whole migration with rc=5.
+#
+# Heavy lifting lives in lib/find_empties.py; this wrapper just forwards args.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+show_help() {
+    cat <<'EOF'
+Usage: bin/porch-find-empties [PROJECT_DIR] [options]
+
+Scan `.cush-secrets` manifests and report which `op://` refs resolve to
+empty / missing / errored values in 1Password.
+
+  bin/porch-find-empties                       # scan $PWD
+  bin/porch-find-empties ~/code/myapp          # scan one project
+  bin/porch-find-empties --all                 # scan every project under ~/local/src
+  bin/porch-find-empties --all --verbose       # include OK rows in --all output
+  bin/porch-find-empties --json                # machine-readable output
+
+Options:
+  --all                   Scan every project under ~/local/src
+  --root <path>           Custom root for --all (repeatable)
+  --json                  Emit JSON instead of a table
+  --verbose               In --all mode, also show OK rows
+  -h, --help              Show this help
+
+Statuses:
+  OK         Value is non-empty
+  EMPTY      `op read` returned exit 0 with empty stdout (needs fix)
+  MISSING    Item or field doesn't exist in 1Password (needs fix)
+  ERROR      Other op failure (vault access, malformed ref, etc.)
+  n/a        Non-`op://` ref (e.g. `inf://`); skipped
+
+Auth: relies on whatever auth `op` itself is configured with — service
+account token (OP_SERVICE_ACCOUNT_TOKEN), signed-in session, or desktop
+integration. Bails with exit 3 and a setup hint if `op whoami` fails.
+
+Exit codes:
+  0   No problems found (or --all default with all OK)
+  1   At least one EMPTY / MISSING / ERROR row reported
+  2   Argument or discovery error
+  3   1Password CLI not authenticated
+EOF
+}
+
+# Quick help check — argparse handles the rest, but a bare -h shouldn't
+# even need to spawn python.
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+    esac
+done
+
+exec python3 "$TUNNEL_DIR/lib/find_empties.py" "$@"

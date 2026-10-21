@@ -2402,7 +2402,7 @@ def main():
     parser.add_argument('--kinds', type=str, default='image',
                         help='comma-separated media kinds: image, video')
     parser.add_argument('--devices', type=str, default='',
-                        help='path to cush-auth devices.json; enrolled browsers '
+                        help='path to porch-auth devices.json; enrolled browsers '
                              'become the gallery owner (delete + reorder)')
     parser.add_argument('--open', action='store_true',
                         help='DANGEROUS explicit opt-in: treat every visitor as the '
@@ -2487,12 +2487,12 @@ def main():
     server = make_server(MediaHandler, args.port, args.bind, tag=tag,
                          max_connections=max(4, args.max_connections))
     mode = 'OPEN (everyone is owner)' if args.open else (
-        'cush-auth owner gate' if args.devices else 'view+add only (no owner configured)')
+        'porch-auth owner gate' if args.devices else 'view+add only (no owner configured)')
     if args.view_only and not args.open:
-        mode = ('cush-auth owner gate, view-only for guests' if args.devices
+        mode = ('porch-auth owner gate, view-only for guests' if args.devices
                 else 'view only (no owner configured)')
     elif args.no_guest_upload and not args.open:
-        mode = ('cush-auth owner gate, no guest uploads' if args.devices
+        mode = ('porch-auth owner gate, no guest uploads' if args.devices
                 else 'view+download only (no owner configured)')
     sys.stderr.write(
         f"[{tag}] Listening on {args.bind}:{args.port}, "

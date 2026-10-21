@@ -1,4 +1,4 @@
-"""Client for cush-auth's CLI-token API (/auth/admin/* on 127.0.0.1:9512),
+"""Client for porch-auth's CLI-token API (/auth/admin/* on 127.0.0.1:9512),
 shared by bin/auth-admin and Pocket.
 
 The token is the one the running server writes to data/.admin-cli-token
@@ -11,10 +11,10 @@ the transport error, and raised `from None`.
 Requests never go through an HTTP proxy from the environment
 (ProxyHandler({})) and never carry Origin or forwarded headers: the server
 ignores the token on anything that looks proxied, and it must not leave the
-box. A 401 re-reads the token file once and, if it changed (cush-auth
+box. A 401 re-reads the token file once and, if it changed (porch-auth
 restarted between the read and the call), retries with the new token.
 
-CUSH_AUTH_URL overrides the base URL (tests); it must stay a loopback URL.
+PORCH_AUTH_URL (old name: CUSH_AUTH_URL) overrides the base URL (tests); it must stay a loopback URL.
 """
 
 import json
@@ -32,7 +32,7 @@ WRONG_PASSWORD = 'invalid password'
 
 
 class AuthError(Exception):
-    """cush-auth answered with an error. `status` is the HTTP code (0 when
+    """porch-auth answered with an error. `status` is the HTTP code (0 when
     there was no usable answer), `message` the server's `error` text (may be
     empty), `reason` the HTTP reason phrase."""
 
@@ -58,7 +58,7 @@ class BadReply(AuthError):
 
 
 class AuthDown(Exception):
-    """cush-auth could not be reached at all."""
+    """porch-auth could not be reached at all."""
 
     def __init__(self, url, detail):
         super().__init__(f'could not reach authserver at {url}: {detail}')
@@ -67,11 +67,11 @@ class AuthDown(Exception):
 
 
 def base_url():
-    return os.environ.get('CUSH_AUTH_URL', DEFAULT_URL)
+    return os.environ.get('PORCH_AUTH_URL') or os.environ.get('CUSH_AUTH_URL') or DEFAULT_URL
 
 
 class Client:
-    """One cush-auth endpoint + the data dir holding its CLI token."""
+    """One porch-auth endpoint + the data dir holding its CLI token."""
 
     def __init__(self, data_dir, url=None, timeout=TIMEOUT):
         self.data_dir = data_dir
@@ -95,7 +95,7 @@ class Client:
             st = os.stat(path)
         except OSError as e:
             raise TokenError(f"could not read {path}: {e} "
-                             "(is cush-auth running? it writes the token on start)") from None
+                             "(is porch-auth running? it writes the token on start)") from None
         key = (st.st_mtime_ns, st.st_size, st.st_ino)
         with self._lock:
             if not fresh and self._cache[0] == key:
@@ -105,9 +105,9 @@ class Client:
                 token = f.read().strip()
         except OSError as e:
             raise TokenError(f"could not read {path}: {e} "
-                             "(is cush-auth running? it writes the token on start)") from None
+                             "(is porch-auth running? it writes the token on start)") from None
         if not token:
-            raise TokenError(f"{path} is empty; restart cush-auth with bin/auth-deploy")
+            raise TokenError(f"{path} is empty; restart porch-auth with bin/auth-deploy")
         with self._lock:
             self._cache = (key, token)
         return token
@@ -153,7 +153,7 @@ class Client:
         except AuthError as e:
             if e.status != 401:
                 raise
-            # cush-auth writes a new token on every start: one retry, only
+            # porch-auth writes a new token on every start: one retry, only
             # when the file really changed (a wrong password is also a 401).
             fresh = self.token(fresh=True)
             if fresh == token:
@@ -235,7 +235,7 @@ class Client:
 
     def verify_password(self, password, ip=None):
         """True for the admin password, False for a wrong one. A 429 (the
-        login limiter) or 503 (scrypt busy) raises AuthError; a cush-auth
+        login limiter) or 503 (scrypt busy) raises AuthError; a porch-auth
         without the endpoint raises AuthError(404)."""
         body = {'password': password}
         if ip:

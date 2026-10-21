@@ -1,5 +1,5 @@
 """Pocket step-up and passkeys (lib/pocket_stepup.py) at the HTTP level, with
-the software authenticator (tests/webauthn_soft.py) and a fake cush-auth for
+the software authenticator (tests/webauthn_soft.py) and a fake porch-auth for
 the password path. Clocks are injected; nothing touches ~/pocket or the live
 auth server."""
 
@@ -168,7 +168,7 @@ class PasswordTests(Base):
         self.assertEqual((r.status, out["code"]), (429, "rate_limited"))
         self.assertGreater(out["retry_after"], 0)
         self.assertEqual(r.getheader("Retry-After"), str(out["retry_after"]))
-        # Blocked before any verification work: five checks reached cush-auth, not six.
+        # Blocked before any verification work: five checks reached porch-auth, not six.
         n = len([s for s in self.fx.auth.seen if s["path"] == "/auth/admin/verify-password"])
         self.assertEqual(n, 5)
         self.assertNotIn("nope-nope-nope", cap.text)

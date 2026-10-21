@@ -15,7 +15,7 @@ Each non-home machine authenticates with its own revocable device token. On a fr
 curl -sSL https://tunnel.<your-porch-domain>/install.sh | sh   # from your Porch landing page
 ```
 
-The installer extracts cush-tools to `~/cush-tools`, grabs the frpc binary, and runs `bin/bootstrap`, which prints a pairing code like `ABCD-1234`. Approve it at `https://tunnel.cush.rocks/auth/` (log in with the admin password, enter the code, click Approve). Bootstrap then writes `config/frpc.toml` and the usual `bin/tunnel` / `bin/serve` commands work on the new machine.
+The installer extracts Porch to `~/porch` (a machine paired before the rename keeps `~/cush-tools`), grabs the frpc binary, and runs `bin/bootstrap`, which prints a pairing code like `ABCD-1234`. Approve it at `https://tunnel.cush.rocks/auth/` (log in with the admin password, enter the code, click Approve). Bootstrap then writes `config/frpc.toml` and the usual `bin/tunnel` / `bin/serve` commands work on the new machine.
 
 Manage paired devices from the home box:
 
@@ -281,7 +281,7 @@ bin/drop photos --bg        # -> daemonized
 ```
 
 Guests can only upload. Listing and downloading are owner-only, unlocked for a
-browser enrolled with cush-auth (`--devices data/devices.json`, same gate as
+browser enrolled with porch-auth (`--devices data/devices.json`, same gate as
 media). Defaults: 2GB per file, 20GB and 5000 files per drop, a 1GB free-disk
 floor, 4 concurrent uploads (2 per client). `lib/dropserver.py` takes
 `--max-file-mb`, `--max-total-mb`, `--max-files`, `--min-free-mb`,
@@ -307,7 +307,7 @@ bin/photos album --bg       # -> daemonized
 
 A browser gallery where anyone can add photos ("Choose Photos" or "Take Photo"
 — camera on mobile) and open a lightbox. Deleting and drag-to-reorder are
-owner-only, behind the same cush-auth gate as `bin/media`. Drag-reorder works on
+owner-only, behind the same porch-auth gate as `bin/media`. Drag-reorder works on
 both mobile and desktop, and the arranged order is preserved across reloads. Image types only: .jpg .jpeg .png .gif .webp .heic
 .heif .bmp .tif .tiff .avif (100MB max per file).
 
@@ -324,7 +324,7 @@ bin/media reel --view-only  # -> guests can watch, not add or download
 The photo gallery grown up to hold **images and video together**, with the
 owner/guest split from `bin/music`. Anyone with the link can browse, play,
 download and **add**; **only the owner can delete or reorder** — unlocked
-automatically for any browser enrolled with cush-auth, validated server-side on
+automatically for any browser enrolled with porch-auth, validated server-side on
 every write against `data/devices.json`. Guests never see a delete control, and
 with no enrolled browser the gallery fails closed to view+add.
 
@@ -369,7 +369,7 @@ enforced mid-stream, and mutating requests need a same-origin `Origin`/`Referer`
 512MB per file, 8GB per gallery, 2000 items. Images: .jpg .jpeg .png .gif .webp
 .heic .heif .bmp .tif .tiff .avif — video: .mp4 .m4v .mov .webm .mkv .ogv .avi
 .3gp. Both `bin/media` and `bin/photos` run on `lib/mediaserver.py`; `bin/photos`
-passes `--kinds image` with the same cush-auth gate. `--open` (everyone is the
+passes `--kinds image` with the same porch-auth gate. `--open` (everyone is the
 owner) is still available on `lib/mediaserver.py` as an explicit opt-in, and
 prints a warning at startup.
 
@@ -390,7 +390,7 @@ download. Peaks and durations are computed server-side by `ffmpeg` into
 support, so seeking is instant.
 
 Uploading, deleting, and reordering are unlocked **automatically for the owner**
-— any browser enrolled with cush-auth, recognized by its host-only `porch_host`
+— any browser enrolled with porch-auth, recognized by its host-only `porch_host`
 cookie (or, during the migration, the domain-wide `cush_auth` cookie),
 validated server-side against `data/devices.json` by `lib/porch_auth.py`;
 every write is re-checked. A guest sees a small "Owner? Sign in" link that
@@ -649,17 +649,17 @@ aborted, `5` user aborted, `7` manifest write failed.
 
 **One-time setup** required: see [1Password setup](#1password-setup).
 
-### Cush-init (scaffold a new project)
+### porch-init (scaffold a new project)
 
 ```bash
-bin/cush-init                          # init in $PWD (default vault: cush)
-bin/cush-init ./fresh                  # mkdir + init in ./fresh
-bin/cush-init --vault Work             # override default vault
-bin/cush-init --no-direnv              # skip writing .envrc
-bin/cush-init --git-init               # also `git init` if not a repo
+bin/porch-init                          # init in $PWD (default vault: cush)
+bin/porch-init ./fresh                  # mkdir + init in ./fresh
+bin/porch-init --vault Work             # override default vault
+bin/porch-init --no-direnv              # skip writing .envrc
+bin/porch-init --git-init               # also `git init` if not a repo
 ```
 
-Bootstraps a project for the cush-tools workflow. Writes `.cush-secrets`
+Bootstraps a project for the Porch secrets workflow. Writes `.cush-secrets`
 (empty manifest), `.envrc` (if `direnv` is on PATH), and appends `.env`,
 `.env.*`, `!.env.example`, and `.cush-secrets.materialized/` to
 `.gitignore`. Idempotent. After init, edit `.cush-secrets` to declare the
@@ -669,33 +669,33 @@ hook runs `bin/inject --env` on `cd` (`direnv allow` once to enable).
 
 Other flags: `--project-name <name>` overrides `{project}` substitution.
 
-### Cush-hooks-install (block `.env` commits)
+### porch-hooks-install (block `.env` commits)
 
 ```bash
-bin/cush-hooks-install                 # install in current repo
-bin/cush-hooks-install ~/code/myproj   # install in a specific repo
-bin/cush-hooks-install --global        # system-wide (covers every repo)
-bin/cush-hooks-install --uninstall [--global]
-bin/cush-hooks-install --check         # report install status
+bin/porch-hooks-install                 # install in current repo
+bin/porch-hooks-install ~/code/myproj   # install in a specific repo
+bin/porch-hooks-install --global        # system-wide (covers every repo)
+bin/porch-hooks-install --uninstall [--global]
+bin/porch-hooks-install --check         # report install status
 ```
 
-Installs `hooks/pre-commit-cush` as a pre-commit hook that blocks staged
+Installs `hooks/pre-commit-porch` as a pre-commit hook that blocks staged
 `.env`-style files and values matching live-secret patterns (`sk_live_*`,
 `ghp_*`, `AKIA*`, ...). Runs `gitleaks` too if it's on PATH. The
 `--global` install uses git's `core.hooksPath` so every repo on the
 machine inherits the hook without per-repo setup.
 
 Allowlist intentional paths (e.g. `.env.example`) by adding them to
-`~/.config/cush-tools/hook-bypass`, one per line.
+`~/.config/porch/hook-bypass`, one per line.
 
-### Cush-audit (drift detector)
+### porch-audit (drift detector)
 
 ```bash
-bin/cush-audit                              # scan ~/local/src
-bin/cush-audit --root ~/code --root ~/work  # multiple roots (repeatable)
-bin/cush-audit --format json                # machine-readable output
-bin/cush-audit --quiet                      # only show projects with drift
-bin/cush-audit --strict                     # exit 1 on any drift (cron-friendly)
+bin/porch-audit                              # scan ~/local/src
+bin/porch-audit --root ~/code --root ~/work  # multiple roots (repeatable)
+bin/porch-audit --format json                # machine-readable output
+bin/porch-audit --quiet                      # only show projects with drift
+bin/porch-audit --strict                     # exit 1 on any drift (cron-friendly)
 ```
 
 Read-only. Walks each root, finds `.env*` files and `.cush-secrets`
@@ -750,7 +750,7 @@ bin/pocket --install-service  # keep it up across reboots (systemd user unit)
 bin/pocket --uninstall-service
 ```
 
-Owner only: only a browser enrolled with cush-auth gets past the sign-in page.
+Owner only: only a browser enrolled with porch-auth gets past the sign-in page.
 Open it on your phone and add it to the home screen; on Android it then shows
 up in the share sheet, so sharing a photo, file or link sends it to Pocket.
 Text and links become the clipboard, which every open Pocket page (and
@@ -831,7 +831,7 @@ bin/status extend myapp     # Reset the 1-hour auto-expiry timer
 
 `bin/secure-entry --save-to-op`, `bin/inject`, and `bin/stash` need the `op`
 CLI authenticated. `lib/op.sh` supports two modes, picked automatically based
-on which env vars are exported in `~/.config/cush-tools/op.env` (Mode 1 wins
+on which env vars are exported in `~/.config/porch/op.env` (Mode 1 wins
 if both are configured).
 
 ### Mode 1 — Service account token (Teams / Business plans)
@@ -839,14 +839,14 @@ if both are configured).
 Stateless: every `op` call carries the token, no signin step.
 
 ```bash
-mkdir -p ~/.config/cush-tools && chmod 700 ~/.config/cush-tools
-cat > ~/.config/cush-tools/op.env <<'EOF'
+mkdir -p ~/.config/porch && chmod 700 ~/.config/porch
+cat > ~/.config/porch/op.env <<'EOF'
 export OP_SERVICE_ACCOUNT_TOKEN=ops_REPLACE_ME
 EOF
-chmod 600 ~/.config/cush-tools/op.env
+chmod 600 ~/.config/porch/op.env
 ```
 
-Create a service account with scope on the vaults you want cush-tools to
+Create a service account with scope on the vaults you want Porch to
 access: <https://developer.1password.com/docs/service-accounts/>
 
 ### Mode 2 — Stored credentials (Family / Personal plans)
@@ -856,14 +856,14 @@ once and `op signin` as needed, caching the resulting session token in
 `$XDG_RUNTIME_DIR/cush-op-session` (tmpfs, cleared on reboot).
 
 ```bash
-mkdir -p ~/.config/cush-tools && chmod 700 ~/.config/cush-tools
-cat > ~/.config/cush-tools/op.env <<'EOF'
+mkdir -p ~/.config/porch && chmod 700 ~/.config/porch
+cat > ~/.config/porch/op.env <<'EOF'
 export OP_SUBDOMAIN=my              # the subdomain in your 1password.com URL
 export OP_EMAIL=you@example.com
 export OP_SECRET_KEY=A3-XXXXXX-...  # from 1password.com → My Profile → Get the app
 export OP_MASTER_PASSWORD='your-master-password'
 EOF
-chmod 600 ~/.config/cush-tools/op.env
+chmod 600 ~/.config/porch/op.env
 ```
 
 Wrap the master password in single quotes (not double) so `$`, `!`, `` ` ``,
@@ -889,11 +889,11 @@ Once 1Password is configured, the typical end-to-end flow is:
 
 ```bash
 # One-time per machine: block accidental .env commits everywhere
-bin/cush-hooks-install --global
+bin/porch-hooks-install --global
 
 # New project
 cd ~/code/newproj
-bin/cush-init                       # scaffold .cush-secrets + .envrc + .gitignore
+bin/porch-init                       # scaffold .cush-secrets + .envrc + .gitignore
 $EDITOR .cush-secrets               # declare needed env vars (op:// refs)
 bin/inject                          # spawn secure-entry forms for any missing values
 direnv allow                        # (optional) auto-load .env on cd
@@ -904,7 +904,7 @@ bin/stash                           # interactive walk → 1Password + manifest
 bin/inject --check                  # verify the round-trip
 
 # Periodic drift check across every project
-bin/cush-audit --strict             # cron-friendly; exits 1 on drift
+bin/porch-audit --strict             # cron-friendly; exits 1 on drift
 ```
 
 ## Landing Page
@@ -912,7 +912,7 @@ bin/cush-audit --strict             # cron-friendly; exits 1 on drift
 The tunnel landing page is served at `https://tunnel.cush.rocks` (nginx on port 8091).
 
 - Source: `site/index.html` (its **Admin** link goes to `https://panel.cush.rocks`,
-  the cush-auth-gated tunnel console served by `lib/statusserver.py`)
+  the porch-auth-gated tunnel console served by `lib/statusserver.py`)
 - Installer: `site/install.sh` (served at `https://tunnel.cush.rocks/install.sh`)
 - Deploy: `bin/deploy` (copies both to `/var/www/tunnel/`)
 
@@ -920,11 +920,13 @@ The tunnel landing page is served at `https://tunnel.cush.rocks` (nginx on port 
 
 Per-device pairing is handled by `lib/authserver.py` (listens on `127.0.0.1:9512`). It implements the frp `[[httpPlugins]]` webhook for the `Login`, `NewProxy`, `NewWorkConn` and `Ping` ops and serves the admin web UI. A remote device may only open `http`/`https` proxies on a plain subdomain; `tcp`/`udp`, `custom_domains`, `entry-*` names and the reserved names (auth, www, api, admin, panel, status) need the `tunnel_admin` flag (`bin/auth-admin role <device> admin`). Generated frpc configs set `transport.heartbeatInterval = 30` so a revoked device is dropped at its next heartbeat.
 
-`bin/auth-admin` sends every change through the running server (`CUSH_AUTH_URL` overrides the URL); `revoke`, `set-password` and `server` fall back to editing `data/devices.json` under `data/.devices.lock` when the server is down. `approve` needs `--apps` for web pairings. Login, enroll and setup share one limiter (5/min per IP, global stop after 30 failures/min), and auth pages send a strict nonce CSP. Device registry lives in `data/devices.json` (gitignored). See the [Pair a new machine](#pair-a-new-machine) section for the user-facing flow.
+`bin/auth-admin` sends every change through the running server (`PORCH_AUTH_URL`, old name `CUSH_AUTH_URL`, overrides the URL); `revoke`, `set-password` and `server` fall back to editing `data/devices.json` under `data/.devices.lock` when the server is down. `approve` needs `--apps` for web pairings. Login, enroll and setup share one limiter (5/min per IP, global stop after 30 failures/min), and auth pages send a strict nonce CSP. Device registry lives in `data/devices.json` (gitignored). See the [Pair a new machine](#pair-a-new-machine) section for the user-facing flow.
 
-The console, `/login` and the invite page load no third-party assets. Their Tailwind classes are compiled into `lib/auth.css` (committed, served at `/auth/static/auth.css`) by `bin/auth-css`, which uses a version- and sha256-pinned Tailwind standalone CLI cached in `~/.cache/cush-tools/`. After changing classes in `lib/authserver.py`, run `bin/auth-css` and commit the result; `bin/auth-deploy` refuses to restart the service while the file is missing or stale. Write class names out whole: one assembled from fragments in JS gets no rule.
+The console, `/login` and the invite page load no third-party assets. Their Tailwind classes are compiled into `lib/auth.css` (committed, served at `/auth/static/auth.css`) by `bin/auth-css`, which uses a version- and sha256-pinned Tailwind standalone CLI cached in `~/.cache/porch/`. After changing classes in `lib/authserver.py`, run `bin/auth-css` and commit the result; `bin/auth-deploy` refuses to restart the service while the file is missing or stale. Write class names out whole: one assembled from fragments in JS gets no rule.
 
-Install the systemd unit (it is a template: edit `/opt/porch` and `User=` first):
+`porch setup` runs it as the user unit `porch-auth` (with the other
+`porch-*` units). For a hand-made install there is a system unit template
+(it keeps the pre-rename name `cush-auth`; edit `/opt/porch` and `User=` first):
 
 ```bash
 sudo cp config/cush-auth.service /etc/systemd/system/

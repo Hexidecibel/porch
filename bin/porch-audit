@@ -1,0 +1,64 @@
+#!/bin/bash
+# Porch: drift detector for the 1Password-backed secrets workflow.
+#
+# Re-scans one or more roots for `.env`-style files, groups by project, and
+# reports drift against each project's `.cush-secrets` manifest. Filesystem-
+# only — never reads from 1Password and never echoes secret values.
+#
+# Useful as a periodic check (cron + --strict for non-zero exit on drift).
+#
+# Heavy lifting lives in lib/audit.py; this wrapper just forwards args.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+show_help() {
+    cat <<'EOF'
+Usage: bin/porch-audit [options]
+
+Walk one or more roots, find .env-style files, group by project, and report
+drift against each project's `.cush-secrets` manifest.
+
+  bin/porch-audit                          # scan ~/local/src
+  bin/porch-audit --root ~/code            # scan a custom root
+  bin/porch-audit --root ~/code --root ~/work   # multiple roots
+  bin/porch-audit --format json            # machine-readable output
+  bin/porch-audit --quiet                  # only show projects with drift
+  bin/porch-audit --strict                 # exit 1 if any drift detected
+
+Options:
+  --root <path>           Directory to scan (repeatable). Default: ~/local/src
+  --format <human|json>   Output format. Default: human
+  --strict                Exit non-zero if any drift detected (good for cron)
+  --quiet                 Suppress projects with no issues
+  -h, --help              Show this help
+
+Project states:
+  CLEAN                Manifest present, every .env key in manifest
+  MISSING_MANIFEST     .env exists, no .cush-secrets in this project
+  MANIFEST_MISMATCH    .env has keys not in .cush-secrets
+  MANIFEST_ORPHAN      .cush-secrets has keys not in any .env (often fine)
+  TRACKED_ENV          .env file is git-tracked (should be gitignored)
+  TRACKED_ENV_HOT      Tracked .env contains values matching known secret
+                       patterns (sk_live_*, ghp_*, AKIA*, ...) — ROTATE FIRST
+
+Exit codes:
+  0   No drift, OR drift found and --strict not passed
+  1   Drift found and --strict passed
+  2   Invalid args / scan failure
+EOF
+}
+
+# Quick help check — argparse handles the rest, but a bare -h shouldn't even
+# need to spawn python.
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+    esac
+done
+
+exec python3 "$TUNNEL_DIR/lib/audit.py" "$@"

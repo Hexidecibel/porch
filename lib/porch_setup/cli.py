@@ -24,7 +24,11 @@ BIN_DIR = os.path.join(REPO_DIR, "bin")
 PASSTHROUGH = ("tunnel", "serve", "drop", "photos", "media", "music", "paste", "exchange",
                "secure-entry", "form", "qr", "snap", "shorten", "chat", "inject", "stash",
                "expose", "hook", "pocket", "view")
-ALIASES = {"auth": "auth-admin", "status": "status"}
+ALIASES = {"auth": "auth-admin", "status": "status",
+           # the secrets workflow (bin/porch-*; bin/cush-* are the old names)
+           "init": "porch-init", "audit": "porch-audit", "hooks-install": "porch-hooks-install",
+           "find-empties": "porch-find-empties", "migrate-backend": "porch-migrate-backend",
+           "migrate-all": "porch-migrate-all", "secrets-reap": "porch-secrets-reap"}
 SERVER = {"start": "start-server", "stop": "stop-server"}
 # Subcommands implemented by porch_setup/cmd_<name>.py (built by W1/W2/W3).
 MODULE_COMMANDS = {
@@ -50,6 +54,8 @@ setup engine:
 existing tools:
   """ + " ".join(PASSTHROUGH) + """
   auth ...     bin/auth-admin          server start|stop   status
+  init audit hooks-install find-empties migrate-backend migrate-all secrets-reap
+               the secrets workflow (bin/porch-init, ...)
   public ...   public paths on gated apps: ls | add HOST PATH --app A --why W | on|off|rm ID
 """
 

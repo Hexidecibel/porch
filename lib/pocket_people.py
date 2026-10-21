@@ -1,13 +1,13 @@
 """Pocket's people and requests API (/api/people*, /api/requests*) through
-cush-auth's CLI-token API (lib/auth_client.py), plus AuthWatcher.
+porch-auth's CLI-token API (lib/auth_client.py), plus AuthWatcher.
 
 Every answer is rebuilt from a whitelist of fields, never passed through as
-cush-auth sent it. The CLI token stays in auth_client (read per call from
+porch-auth sent it. The CLI token stays in auth_client (read per call from
 data/.admin-cli-token); it is never logged, echoed or put in an error.
 An invite's URL is in the create answer once and nowhere else (not logged,
 not audited, not kept).
 
-AuthWatcher polls /auth/admin/state (every 5s, every 30s while cush-auth is
+AuthWatcher polls /auth/admin/state (every 5s, every 30s while porch-auth is
 down). On a change (ignoring last_seen and run_id_history) it bumps the hub's
 `people` counter; a new pending pairing pushes {t: 'pairing'} (topic
 `pairing`), an invite whose uses went up or that minted a new device pushes
@@ -117,7 +117,7 @@ ACCESS_STATES = ('pending', 'granting', 'approved', 'denied', 'expired')
 
 
 def public_access(r):
-    """One Ask for access, owner view (cush-auth never sends tokens or links)."""
+    """One Ask for access, owner view (porch-auth never sends tokens or links)."""
     return {
         'id': _s(r.get('id'), 16), 'host': _s(r.get('host'), 253), 'note': _s(r.get('note'), 40),
         'ip': _s(r.get('ip'), 64) or None,
@@ -216,7 +216,7 @@ class AuthWatcher:
     # -- one poll --
 
     def probe(self):
-        """Does cush-auth have verify-password / device-rename? A body the
+        """Does porch-auth have verify-password / device-rename? A body the
         endpoint refuses (400) means yes, 404 'not found' means no. Never a
         password attempt: the body is a JSON list."""
         caps = {}
@@ -241,7 +241,7 @@ class AuthWatcher:
                 was = self.last_error
                 self.last_error = 'down'
             if was != 'down':
-                self.log('auth watcher: cush-auth is not answering')
+                self.log('auth watcher: porch-auth is not answering')
                 self.bump()
             return False
         except auth_client.AuthError as e:
@@ -249,7 +249,7 @@ class AuthWatcher:
                 was = self.last_error
                 self.last_error = 'error'
             if was != 'error':
-                self.log(f'auth watcher: cush-auth answered {e.status}')
+                self.log(f'auth watcher: porch-auth answered {e.status}')
                 self.bump()
             return False
         if not isinstance(state, dict) or state.get('needs_setup'):
@@ -338,21 +338,21 @@ class AuthOpError(Exception):
 
 
 class PeopleMixin:
-    auth = None                 # auth_client.Client; None = no cush-auth (auth_down)
+    auth = None                 # auth_client.Client; None = no porch-auth (auth_down)
     watcher = None              # AuthWatcher
 
     def _auth(self, fn, *args, old_ok=False):
-        """Call cush-auth; map its failures to AuthOpError."""
+        """Call porch-auth; map its failures to AuthOpError."""
         if self.auth is None:
-            raise AuthOpError(503, "cush-auth isn't configured for this pocket", 'auth_down')
+            raise AuthOpError(503, "porch-auth isn't configured for this pocket", 'auth_down')
         try:
             out = fn(*args)
         except (auth_client.AuthDown, auth_client.TokenError):
-            raise AuthOpError(503, "cush-auth isn't answering; doors still work",
+            raise AuthOpError(503, "porch-auth isn't answering; doors still work",
                               'auth_down') from None
         except auth_client.AuthError as e:
             if e.status == 404 and e.message == 'not found':
-                raise AuthOpError(501, 'update cush-auth (bin/auth-deploy)', 'auth_old') from None
+                raise AuthOpError(501, 'update porch-auth (bin/auth-deploy)', 'auth_old') from None
             if e.status == 404:
                 raise AuthOpError(404, _s(e.message, 200) or 'Not found', 'not_found') from None
             if e.status in (400, 409, 410):
@@ -361,7 +361,7 @@ class PeopleMixin:
             if e.status == 429:
                 raise AuthOpError(429, 'Too many attempts; wait a minute', 'rate_limited',
                                   retry_after=60) from None
-            raise AuthOpError(502, f'cush-auth answered {e.status}', 'auth_error') from None
+            raise AuthOpError(502, f'porch-auth answered {e.status}', 'auth_error') from None
         if self.watcher is not None and getattr(fn, '__name__', '') not in ('state', 'public_paths'):
             # A write: let the watcher see it now rather than in 5s.
             threading.Thread(target=self.watcher.poll_once, daemon=True).start()
@@ -552,7 +552,7 @@ class PeopleMixin:
         url = out.get('url')
         inv = out.get('invite') if isinstance(out.get('invite'), dict) else {}
         if not isinstance(url, str) or not url.startswith('https://'):
-            raise AuthOpError(502, 'cush-auth sent no invite link', 'auth_error')
+            raise AuthOpError(502, 'porch-auth sent no invite link', 'auth_error')
         self._audit('invite.create', _s(inv.get('id'), 64),
                     detail='standing' if standing else 'one-time')
         # The link is in this answer and nowhere else.

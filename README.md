@@ -154,5 +154,7 @@ holds your key. Prices, transfer limits and what has been tested:
 
 MIT. See [LICENSE](LICENSE).
 
-<sub>Porch grew out of <b>cush-tools</b>, which is why a few scripts and
-variables still say <code>cush</code>. Leave the light on.</sub>
+<sub>Porch grew out of <b>cush-tools</b>, which is why a few internal names
+(a cookie, some headers, the <code>.cush-secrets</code> manifest) still say
+<code>cush</code>; see <a href="CONTRIBUTING.md#why-some-things-say-cush">CONTRIBUTING</a>.
+Leave the light on.</sub>

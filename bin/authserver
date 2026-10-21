@@ -1,5 +1,5 @@
 #!/bin/bash
-# cush-tools auth server launcher.
+# Porch auth server launcher.
 # Runs the stdlib Python HTTP server in lib/authserver.py on 127.0.0.1:9512.
 # Extra args (e.g. --port / --data overrides) are passed through.
 

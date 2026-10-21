@@ -34,7 +34,8 @@ https://github.com/<repo>/releases/latest/download/porch.tar.gz (+ .sha256).
   --repo         default Hexidecibel/porch
   --dist DIR     where the tarball lands (default
                  ~/.local/share/porch/release/<version>)
-  --remote URL   fetch/push URL (default https://github.com/<repo>.git)
+  --remote URL   fetch/push URL (default git@github.com:<repo>.git: pushing
+                 .github/workflows needs more than gh's default token scope)
 
 Exit: 0 ok (or nothing to release), 1 a step failed or refused, 2 usage (or a
 real run without --yes).
@@ -307,7 +308,7 @@ def main(argv=None):
         p.error(f"--repo must be OWNER/NAME: {args.repo}")
     if args.version and not VERSION_RE.match(args.version):
         p.error(f"--version must look like v1.2.3: {args.version}")
-    remote = args.remote or f"https://github.com/{args.repo}.git"
+    remote = args.remote or f"git@github.com:{args.repo}.git"
     source = os.path.realpath(args.source)
 
     work = tempfile.mkdtemp(prefix="porch-release-")

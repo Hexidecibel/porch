@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the cush-tools test suite (stdlib unittest, no dependencies).
+# Run the Porch test suite (stdlib unittest, no dependencies).
 #
 # Usage: bin/test [unittest args]     e.g. bin/test -k swap
 # The tests use temp dirs and a fake HAProxy socket: safe to run on the live box.

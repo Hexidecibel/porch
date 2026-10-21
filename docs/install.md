@@ -50,16 +50,19 @@ curl -sSL https://raw.githubusercontent.com/Hexidecibel/porch/main/site/porch.sh
   build; `file://` works.
 - **Your landing page's copies.** Once your Porch is up, `bin/deploy` renders
   `site/*.sh` for your domain and publishes them on your landing page with a
-  fresh `cush-tools.tar.gz` (+ `.sha256`) built from your own install, so
+  fresh `porch.tar.gz` (+ `.sha256`; also as `cush-tools.tar.gz`, its old
+  name, for installers already out there) built from your own install, so
   `curl -sSL https://tunnel.<your-domain>/porch.sh | sudo sh` installs exactly
   what your server runs.
 - **`site/install.sh`** (the client installer) only makes sense against a
   Porch server: run it from your landing page (below). The repo copy is a
-  template and stops with a message unless `CUSH_AUTH_URL` and
-  `CUSH_REPO_TARBALL` are set. **`bin/bootstrap`** likewise needs
+  template and stops with a message unless `PORCH_AUTH_URL` and
+  `PORCH_REPO_TARBALL` are set (the old `CUSH_*` names still work). It installs
+  into `~/porch` (`PORCH_DIR`); a machine paired before the rename keeps its
+  `~/cush-tools`. **`bin/bootstrap`** likewise needs
   `--auth-url https://tunnel.<your-domain>` on a machine with no Porch config.
-- The tarball holds one top-level directory (`porch/` in a release,
-  `cush-tools/` from a landing page); the installer takes either.
+- The tarball holds one top-level directory, `porch/` (older landing-page
+  tarballs used `cush-tools/`); the installers take either.
 
 ## By hand
 

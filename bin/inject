@@ -11,7 +11,7 @@
 # `export KEY=value` lines to stdout instead.
 #
 # Requires a 1Password service-account token in
-# ~/.config/cush-tools/op.env (see `bin/secure-entry --help` for setup).
+# ~/.config/porch/op.env (see `bin/secure-entry --help` for setup).
 
 set -euo pipefail
 
@@ -24,9 +24,10 @@ TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # actual ref schemes — so a manifest that only uses inf:// won't fail just
 # because op isn't configured, and vice versa.
 # shellcheck source=../lib/op.sh
-[ -f "$HOME/.config/cush-tools/op.env" ] && . "$TUNNEL_DIR/lib/op.sh"
+. "$TUNNEL_DIR/lib/porch-user-config.sh"
+[ -f "$(porch_user_config_file op.env)" ] && . "$TUNNEL_DIR/lib/op.sh"
 # shellcheck source=../lib/infisical.sh
-[ -f "$HOME/.config/cush-tools/infisical.env" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+[ -f "$(porch_user_config_file infisical.env)" ] && . "$TUNNEL_DIR/lib/infisical.sh"
 
 show_help() {
     cat <<'EOF'
@@ -88,7 +89,7 @@ The manifest is safe to commit — refs are pointers, not secrets. Add `.env`
 to your .gitignore (bin/inject does this automatically the first time it
 writes).
 
-1Password setup (one-time): see `~/.config/cush-tools/op.env` and
+1Password setup (one-time): see `~/.config/porch/op.env` and
 https://developer.1password.com/docs/service-accounts/
 EOF
 }

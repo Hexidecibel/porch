@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cush-tools healthcheck — prints a status summary of the home-box setup.
+# Porch healthcheck — prints a status summary of the home-box setup.
 #
 # Checks systemd, local processes, listening ports, public endpoints, and
 # data-file state. Read-only: never tries to fix anything. Exit code:
@@ -51,15 +51,22 @@ info() {
     printf "  %s%s%s  %s\n" "$DIM" "i" "$RESET" "$1"
 }
 
-printf "\n%scush-tools healthcheck%s\n\n" "$BOLD" "$RESET"
+printf "\n%sPorch healthcheck%s\n\n" "$BOLD" "$RESET"
 
-# --- 1. cush-auth systemd service ----------------------------------------------------
+# --- 1. auth server unit -------------------------------------------------------------
+# porch setup installs the porch-auth user unit; hand-made installs (this box)
+# run the system unit under its pre-rename name, cush-auth.
 
-status="$(systemctl is-active cush-auth 2>/dev/null || true)"
+auth_unit="porch-auth (user)"
+status="$(systemctl --user is-active porch-auth 2>/dev/null || true)"
+if [[ "$status" != "active" ]]; then
+    auth_unit="cush-auth"
+    status="$(systemctl is-active cush-auth 2>/dev/null || true)"
+fi
 if [[ "$status" == "active" ]]; then
-    pass "cush-auth service is active"
+    pass "$auth_unit service is active"
 else
-    fail "cush-auth service is not active (status: ${status:-unknown})"
+    fail "auth server unit is not active (porch-auth user unit or cush-auth: ${status:-unknown})"
 fi
 
 # --- 2. frps process -----------------------------------------------------------------
@@ -153,27 +160,30 @@ fi
 
 # --- 8. Tarball served + freshness ---------------------------------------------------
 
-tarball_headers="$(curl -sI -m 10 "$BASE_URL/cush-tools.tar.gz" 2>/dev/null || true)"
-tarball_code="$(printf '%s' "$tarball_headers" | awk 'NR==1 {print $2}')"
-if [[ "$tarball_code" == "200" ]]; then
-    last_mod="$(printf '%s' "$tarball_headers" | grep -i '^last-modified:' | sed 's/^[Ll]ast-[Mm]odified: //; s/\r$//')"
-    if [[ -n "$last_mod" ]]; then
-        mod_epoch="$(date -d "$last_mod" +%s 2>/dev/null || echo 0)"
-        now_epoch="$(date +%s)"
-        age_days=$(( (now_epoch - mod_epoch) / 86400 ))
-        if [[ "$mod_epoch" -gt 0 && "$age_days" -le 7 ]]; then
-            pass "cush-tools.tar.gz served, fresh (${age_days}d old)"
-        elif [[ "$mod_epoch" -gt 0 ]]; then
-            warn "cush-tools.tar.gz served but stale (${age_days}d old — republish?)"
+# porch.tar.gz, and cush-tools.tar.gz (its old name, for installers in the wild)
+for tb in porch.tar.gz cush-tools.tar.gz; do
+    tarball_headers="$(curl -sI -m 10 "$BASE_URL/$tb" 2>/dev/null || true)"
+    tarball_code="$(printf '%s' "$tarball_headers" | awk 'NR==1 {print $2}')"
+    if [[ "$tarball_code" == "200" ]]; then
+        last_mod="$(printf '%s' "$tarball_headers" | grep -i '^last-modified:' | sed 's/^[Ll]ast-[Mm]odified: //; s/\r$//')"
+        if [[ -n "$last_mod" ]]; then
+            mod_epoch="$(date -d "$last_mod" +%s 2>/dev/null || echo 0)"
+            now_epoch="$(date +%s)"
+            age_days=$(( (now_epoch - mod_epoch) / 86400 ))
+            if [[ "$mod_epoch" -gt 0 && "$age_days" -le 7 ]]; then
+                pass "$tb served, fresh (${age_days}d old)"
+            elif [[ "$mod_epoch" -gt 0 ]]; then
+                warn "$tb served but stale (${age_days}d old — republish?)"
+            else
+                warn "$tb served but Last-Modified unparseable"
+            fi
         else
-            warn "cush-tools.tar.gz served but Last-Modified unparseable"
+            warn "$tb served but no Last-Modified header"
         fi
     else
-        warn "cush-tools.tar.gz served but no Last-Modified header"
+        fail "$tb returned ${tarball_code:-000}"
     fi
-else
-    fail "cush-tools.tar.gz returned ${tarball_code:-000}"
-fi
+done
 
 # --- 9. Auth UI ----------------------------------------------------------------------
 

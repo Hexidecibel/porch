@@ -25,7 +25,7 @@ ORDER = 90
 LIVE = "/etc/haproxy/haproxy.cfg"
 PORCH_SECTIONS = {"global", "defaults", "frontend www-https"}
 PORCH_BACKENDS = {"reject", "letsencrypt-backend", "shortener", "tunnel", "panel",
-                  "tunnelroot", "cush_auth", "cushroot"}
+                  "tunnelroot", "porch_auth", "cush_auth", "cushroot"}
 
 
 class Haproxy(Step):

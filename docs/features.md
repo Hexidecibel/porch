@@ -129,11 +129,11 @@ requests live, with Copy as curl and Replay.
 
 ```bash
 porch secure-entry api-key --save-to-secrets inf://prod/app/API_KEY --bg   # someone types it; it lands in your vault
-bin/cush-init                     # scaffold a .cush-secrets manifest of refs (safe to commit)
+bin/porch-init                     # scaffold a .cush-secrets manifest of refs (safe to commit)
 bin/inject                        # refs -> .env (0600); missing ones open a secure-entry form
 bin/stash                         # move an existing .env into your vault
-bin/cush-hooks-install --global   # refuse commits containing .env files or live-looking keys
-bin/cush-audit                    # find projects whose .env drifted from the manifest
+bin/porch-hooks-install --global   # refuse commits containing .env files or live-looking keys
+bin/porch-audit                    # find projects whose .env drifted from the manifest
 ```
 
 Backends: Infisical (`inf://`) and 1Password (`op://`).

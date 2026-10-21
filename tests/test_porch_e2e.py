@@ -710,7 +710,7 @@ class InstallerRun(FakeRun):
             with open(out, "wb") as f:
                 f.write(b"TARBALL")
             with open(out + ".sha256", "w") as f:
-                f.write("ab" * 32 + "  cush-tools.tar.gz\n")
+                f.write("ab" * 32 + "  porch.tar.gz\n")
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         return super().__call__(argv, input=input, capture_output=capture_output, timeout=timeout,
                                 check=check, **kw)
@@ -728,12 +728,12 @@ class TestInstaller(Base):
         self.assertFalse(any("tar -x -C" in a[-1] for a, _ in run.calls))
         # the tarball and its .sha256 go to /root/porch-install
         ups = {a[-1]: inp for a, inp in run.calls if a[0] == "ssh" and a[-1].startswith("cat > ")}
-        self.assertEqual(ups[f"cat > {e2e.INSTALL_UPLOAD}/cush-tools.tar.gz"], b"TARBALL")
-        self.assertIn(b"  cush-tools.tar.gz", ups[f"cat > {e2e.INSTALL_UPLOAD}/cush-tools.tar.gz.sha256"])
+        self.assertEqual(ups[f"cat > {e2e.INSTALL_UPLOAD}/porch.tar.gz"], b"TARBALL")
+        self.assertIn(b"  porch.tar.gz", ups[f"cat > {e2e.INSTALL_UPLOAD}/porch.tar.gz.sha256"])
         (call,) = pop.calls
         self.assertIn("root@203.0.113.7", call["argv"])
         self.assertEqual(call["argv"][-1],
-                         f"PORCH_TARBALL=file://{e2e.INSTALL_UPLOAD}/cush-tools.tar.gz sh -s -- "
+                         f"PORCH_TARBALL=file://{e2e.INSTALL_UPLOAD}/porch.tar.gz sh -s -- "
                          "--staging --domain cjc1.com --dns-provider cloudflare")
         with open(os.path.join(os.path.dirname(__file__), "..", "site", "porch.sh"), "rb") as f:
             self.assertEqual(call["stdin"], f.read())
@@ -758,7 +758,7 @@ class TestInstaller(Base):
         fake, run, pop = FakeDO(), InstallerRun(), FakePopen(lines=[b"x boom\n"], rc=1)
         self.assertEqual(self.main(["up", "--installer", "--production"], fake, run=run, popen=pop), 1)
         self.assertEqual(pop.calls[0]["argv"][-1],
-                         f"PORCH_TARBALL=file://{e2e.INSTALL_UPLOAD}/cush-tools.tar.gz sh -s --")
+                         f"PORCH_TARBALL=file://{e2e.INSTALL_UPLOAD}/porch.tar.gz sh -s --")
         self.assertIn("  | x boom", self.out.getvalue())
         self.assertEqual(e2e.load_state(self.dir)["results"]["installer"]["exit"], 1)
 

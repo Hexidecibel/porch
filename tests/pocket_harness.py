@@ -1,6 +1,6 @@
 """Shared fixtures for tests/test_pocket_api.py and tests/test_pocket_stepup.py:
 a Pocket server on an ephemeral 127.0.0.1 port in a thread, every store in a
-temp dir, a fake cush-auth (CLI-token API) on another thread, an injectable
+temp dir, a fake porch-auth (CLI-token API) on another thread, an injectable
 clock, fake launchers. Never touches ~/pocket, data/, /tmp/tunnel-state or
 the live auth server. (Not a test module: it defines no TestCase.)
 """
@@ -70,7 +70,7 @@ class Clock:
         self.t += s
 
 
-# ---- fake cush-auth ---------------------------------------------------------------
+# ---- fake porch-auth ---------------------------------------------------------------
 
 def fake_auth_state():
     return {

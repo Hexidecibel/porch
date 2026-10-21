@@ -90,7 +90,7 @@ print(json.dumps({
     **({'inspect': door_state.clean_inspect(spec.get('inspect'))}
        if door_state.clean_inspect(spec.get('inspect')) else {}),
 }, indent=2))
-" "$name" "$type" "$pid" "$port" "$now" "${CUSH_LOG_FILE:-}" "$( [ -n "${_CUSH_DAEMONIZED:-}" ] && echo true || echo false )" "$_DOOR_LIB" > "${TUNNEL_STATE_DIR}/${name}.json.tmp" )
+" "$name" "$type" "$pid" "$port" "$now" "${PORCH_LOG_FILE:-${CUSH_LOG_FILE:-}}" "$( [ -n "${_CUSH_DAEMONIZED:-}" ] && echo true || echo false )" "$_DOOR_LIB" > "${TUNNEL_STATE_DIR}/${name}.json.tmp" )
 
     # This launch's recipe (lib/door_recipe.py) puts its cookie key back, so a
     # reopened door keeps its sessions; a recipe left by an older door under
@@ -105,7 +105,8 @@ print(json.dumps({
     (
         local _ts_dir
         _ts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        local _history_file="${CUSH_HISTORY_FILE:-$_ts_dir/../data/history.jsonl}"
+        # PORCH_HISTORY_FILE wins; CUSH_HISTORY_FILE is its old name.
+        local _history_file="${PORCH_HISTORY_FILE:-${CUSH_HISTORY_FILE:-$_ts_dir/../data/history.jsonl}}"
         mkdir -p "$(dirname "$_history_file")"
         # history.jsonl records argv and cwd: owner-only. umask covers a fresh
         # file; the chmod below tightens one an older version left loose.
@@ -156,7 +157,7 @@ with os.fdopen(fd, 'a') as f:
     except OSError:
         pass
     f.write(json.dumps(rec) + '\n')
-" "$name" "$type" "$pid" "$port" "$now" "${CUSH_LOG_FILE:-}" "$_history_file" "$@"
+" "$name" "$type" "$pid" "$port" "$now" "${PORCH_LOG_FILE:-${CUSH_LOG_FILE:-}}" "$_history_file" "$@"
     ) 2>/dev/null || true
 }
 
@@ -188,13 +189,13 @@ cush_daemonize() {
     fi
 
     export _CUSH_DAEMONIZED=1
-    export CUSH_LOG_FILE="$log_file"
+    export PORCH_LOG_FILE="$log_file"
     # daemonize.py forks twice, setsid's, reopens std streams to $log_file,
     # then execvp's the command. Parent returns immediately after first fork.
     python3 "$daemonize_py" "$log_file" "$@"
     local rc=$?
     unset _CUSH_DAEMONIZED
-    unset CUSH_LOG_FILE
+    unset PORCH_LOG_FILE
 
     if [ "$rc" -ne 0 ]; then
         echo "Error: daemonize helper exited with status $rc" >&2

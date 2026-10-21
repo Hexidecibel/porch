@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy lib/authserver.py to the live cush-auth service.
+# Deploy lib/authserver.py to the live auth server: this box's system unit,
+# which keeps its pre-rename name cush-auth (porch setup installs porch-auth).
 #
 #   1. back up data/devices.json to data/backups/ (0600; the server migrates it on start)
 #   2. byte-compile lib/authserver.py (and lib/porch_auth.py, which it imports),

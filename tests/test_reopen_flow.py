@@ -512,7 +512,7 @@ class LauncherFlowTests(unittest.TestCase):
         cls.env = {k: v for k, v in os.environ.items()
                    if not k.startswith(("PORCH_", "_CUSH", "CUSH_", "_PORCH")) and k != "TUNNEL_NO_STATE"}
         cls.env.update(PORCH_CONFIG="none", XDG_RUNTIME_DIR=run, HOME=cls.tmp,
-                       PORCH_DOORS_DIR=cls.doors, CUSH_HISTORY_FILE=os.path.join(cls.tmp, "h.jsonl"),
+                       PORCH_DOORS_DIR=cls.doors, PORCH_HISTORY_FILE=os.path.join(cls.tmp, "h.jsonl"),
                        PORCH_HOME_TOKEN_FILE=os.path.join(cls.tmp, "none"))
         cls.share = os.path.join(run, "porch", "share")
         os.makedirs(cls.share, 0o700)

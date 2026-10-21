@@ -432,7 +432,7 @@ def site_render(text, cfg):
     so no replacement feeds another."""
     d = load(env={"PORCH_CONFIG": "none"})
     land = f"https://{cfg.landing_host}"
-    pairs = [(RELEASE_TARBALL_URL, f"{land}/cush-tools.tar.gz"),
+    pairs = [(RELEASE_TARBALL_URL, f"{land}/porch.tar.gz"),
              (RAW_INSTALLER_URL, f"{land}/porch.sh"),
              (LANDING_MARK, land),
              (f"https://{d.panel_host}", f"https://{cfg.panel_host}"),

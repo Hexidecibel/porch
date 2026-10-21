@@ -11,7 +11,7 @@
 # UI or `op item delete`.
 #
 # Requires a 1Password service-account token (or stored creds) configured
-# via `~/.config/cush-tools/op.env`. See `bin/inject -h` for setup details.
+# via `~/.config/porch/op.env`. See `bin/inject -h` for setup details.
 
 set -euo pipefail
 
@@ -21,9 +21,10 @@ TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # the python child. Auth is checked per-scheme inside Python now (stash is
 # op-specific, so it probes 'op' there) — no bash-level cush_op_check needed.
 # shellcheck source=../lib/op.sh
-[ -f "$HOME/.config/cush-tools/op.env" ] && . "$TUNNEL_DIR/lib/op.sh"
+. "$TUNNEL_DIR/lib/porch-user-config.sh"
+[ -f "$(porch_user_config_file op.env)" ] && . "$TUNNEL_DIR/lib/op.sh"
 # shellcheck source=../lib/infisical.sh
-[ -f "$HOME/.config/cush-tools/infisical.env" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+[ -f "$(porch_user_config_file infisical.env)" ] && . "$TUNNEL_DIR/lib/infisical.sh"
 
 show_help() {
     cat <<'EOF'
@@ -79,7 +80,7 @@ After a successful stash:
   bin/inject --check      # verifies all refs resolve in 1Password
 
 1Password setup (one-time): see `bin/inject -h` or
-~/.config/cush-tools/op.env.
+~/.config/porch/op.env.
 EOF
 }
 

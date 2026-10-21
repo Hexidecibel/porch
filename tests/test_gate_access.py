@@ -352,7 +352,7 @@ class AccessCliTest(GateCase):
 
     def run_cli(self, *args):
         import subprocess
-        env = dict(os.environ, CUSH_AUTH_URL=f"http://127.0.0.1:{self.port}")
+        env = dict(os.environ, PORCH_AUTH_URL=f"http://127.0.0.1:{self.port}")
         return subprocess.run([sys.executable, self.ADMIN, "--data", self.tmp.name, *args],
                               capture_output=True, text=True, env=env, timeout=60)
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Drift detector for the cush-tools secret-hygiene workflow.
+"""Drift detector for the Porch secret-hygiene workflow.
 
 Scans one or more roots for `.env`-style files, groups them by project,
 classifies the project against any `.cush-secrets` manifest, and reports
 drift in human or JSON form. Pure filesystem-side; never calls 1Password
 and never echoes secret values.
 
-CLI entry point lives in `bin/cush-audit`. This module exposes:
+CLI entry point lives in `bin/porch-audit`. This module exposes:
 
   - find_env_files(root)        → iterator of Path
   - find_project_root(path)     → Path
@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
-# Make sibling modules importable when this file is loaded by `bin/cush-audit`.
+# Make sibling modules importable when this file is loaded by `bin/porch-audit`.
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
@@ -480,7 +480,7 @@ def render_human(
 ) -> str:
     counts = _summary_counts(reports)
     lines: list[str] = []
-    lines.append("cush-audit summary")
+    lines.append("porch-audit summary")
     n_roots = len(roots)
     root_word = "root" if n_roots == 1 else "roots"
     lines.append(
@@ -521,7 +521,7 @@ def render_human(
             lines.append(f"  [CLEAN] {r.path}")
         lines.append("")
 
-    lines.append("Run `bin/cush-audit --format json` for machine output.")
+    lines.append("Run `bin/porch-audit --format json` for machine output.")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -531,7 +531,7 @@ def _render_project_human(r: ProjectReport) -> list[str]:
     if r.state == "MISSING_MANIFEST":
         for fr in r.files:
             out.append(f"  {fr.rel_path} ({len(fr.keys)} secret(s))  → no .cush-secrets in this project")
-        out.append(f"  fix: cd {r.path} && bin/cush-init && bin/stash")
+        out.append(f"  fix: cd {r.path} && bin/porch-init && bin/stash")
     elif r.state == "MANIFEST_MISMATCH":
         for iss in r.issues:
             if iss.get("type") == "extra_keys_in_env":
@@ -648,7 +648,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     import argparse
 
     p = argparse.ArgumentParser(
-        prog="cush-audit",
+        prog="porch-audit",
         description=(
             "Re-scan one or more roots for .env-style files and report drift "
             "against each project's `.cush-secrets` manifest."
@@ -669,13 +669,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     bad_roots = [r for r in roots if not r.exists()]
     if bad_roots:
         for r in bad_roots:
-            print(f"cush-audit: root does not exist: {r}", file=sys.stderr)
+            print(f"porch-audit: root does not exist: {r}", file=sys.stderr)
         return 2
 
     try:
         reports = audit_roots(roots)
     except Exception as e:
-        print(f"cush-audit: scan failure: {e}", file=sys.stderr)
+        print(f"porch-audit: scan failure: {e}", file=sys.stderr)
         return 2
 
     if args.quiet and args.format == "json":

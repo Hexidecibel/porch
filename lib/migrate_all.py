@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Bulk wrapper around `bin/cush-migrate-backend`.
+"""Bulk wrapper around `bin/porch-migrate-backend`.
 
 Walks one or more roots, finds every `.cush-secrets` manifest, and migrates
 each one (op:// → inf://) by shelling out to the per-project tool. Two-phase
 flow by default:
 
-  1. dry-run pass: invoke `bin/cush-migrate-backend --dry-run` for every
+  1. dry-run pass: invoke `bin/porch-migrate-backend --dry-run` for every
      project. Bails on the first failure (unless --continue-on-error).
   2. confirmation prompt (TTY only).
-  3. real-run pass: invoke `bin/cush-migrate-backend` for every project.
+  3. real-run pass: invoke `bin/porch-migrate-backend` for every project.
      Bails on the first failure (unless --continue-on-error).
 
 Already-migrated manifests (only inf:// refs) are skipped before either
@@ -47,8 +47,8 @@ import manifest as manifest_mod
 from manifest import Manifest, ManifestError
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent  # cush-tools/
-MIGRATE_BIN = REPO_ROOT / "bin" / "cush-migrate-backend"
+REPO_ROOT = Path(__file__).resolve().parent.parent  # the repo root
+MIGRATE_BIN = REPO_ROOT / "bin" / "porch-migrate-backend"
 
 # Mirror lib/audit.py's exclusions, plus the extras called out in the spec.
 SKIP_DIR_NAMES = frozenset({
@@ -264,7 +264,7 @@ def _build_per_project_args(
     keep_orphans: bool = False,
     clean_only: bool = False,
 ) -> list:
-    """Build the argv (excluding the binary itself) for cush-migrate-backend."""
+    """Build the argv (excluding the binary itself) for porch-migrate-backend."""
     args = []
     if dry_run:
         args.append("--dry-run")
@@ -305,7 +305,7 @@ def _run_one(
     runner=None,
     timeout: Optional[int] = PER_PROJECT_TIMEOUT_SEC,
 ) -> int:
-    """Invoke `bin/cush-migrate-backend` for one project. Streams output live
+    """Invoke `bin/porch-migrate-backend` for one project. Streams output live
     so the user sees per-project progress for long bulk runs.
 
     `runner` lets tests inject a fake subprocess.run-like callable.
@@ -1027,9 +1027,9 @@ schema = 1
 
 def _build_argparser():
     p = argparse.ArgumentParser(
-        prog="cush-migrate-all",
+        prog="porch-migrate-all",
         description=(
-            "Bulk wrapper around bin/cush-migrate-backend. Walks one or more "
+            "Bulk wrapper around bin/porch-migrate-backend. Walks one or more "
             "roots, finds every .cush-secrets manifest, and migrates each "
             "from op:// to inf://."
         ),
@@ -1069,7 +1069,7 @@ def _build_argparser():
     p.add_argument(
         "--clean-only", action="store_true",
         help="Bulk cleanup mode: walk every matching manifest, run "
-             "`cush-migrate-backend --clean-only` on each, and summarize. "
+             "`porch-migrate-backend --clean-only` on each, and summarize. "
              "Does NOT migrate.",
     )
     p.add_argument(

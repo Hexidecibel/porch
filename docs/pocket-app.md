@@ -115,7 +115,7 @@ and *Apps* (which hosts are gated, and their public paths).
 **You**: *Security* (the unlock, passkeys, admin password), *Notifications*,
 *Share from iPhone* (the Shortcut and its device keys), *Activity* (every
 privileged action, newest first: what, which door or device, unlocked by
-passkey or password, from where) and *About* (pocket name, cush-auth status,
+passkey or password, from where) and *About* (pocket name, porch-auth status,
 version).
 
 ## Unlocking (step-up) and Face ID
@@ -138,7 +138,7 @@ itself.
 **Set up Face ID / fingerprint once** (per device):
 
 1. You → Security → Passkeys → **Add a passkey**.
-2. The first passkey needs the **cush-auth admin password** (the one for
+2. The first passkey needs the **porch-auth admin password** (the one for
    auth.cush.rocks): type it in the unlock sheet.
 3. Your phone asks for Face ID / fingerprint and saves the passkey (iCloud
    Keychain or Google Password Manager sync it to your other devices; it
@@ -180,7 +180,7 @@ listed with their own topics; you can mute or remove them from here.
 - Offline, Pocket still opens (the app is cached on the device) and shows
   "You're offline", with the last data it had; changes are disabled until
   you're back.
-- If cush-auth isn't answering, People and Requests say so in a banner;
+- If porch-auth isn't answering, People and Requests say so in a banner;
   doors keep working.
 - If your sign-in for this host ends, Pocket shows "Signed out on this host"
   with a Sign in button that brings you back where you were.

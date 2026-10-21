@@ -1960,7 +1960,7 @@ class CliThroughApiTest(PassCase):
     ADMIN = os.path.join(_HERE, "..", "bin", "auth-admin")
 
     def run_cli(self, *args, url=None):
-        env = dict(os.environ, CUSH_AUTH_URL=url or f"http://127.0.0.1:{self.port}")
+        env = dict(os.environ, PORCH_AUTH_URL=url or f"http://127.0.0.1:{self.port}")
         return subprocess.run([sys.executable, self.ADMIN, *args, "--data", self.tmp.name],
                               capture_output=True, text=True, env=env, timeout=60)
 
@@ -2013,7 +2013,7 @@ class CliThroughApiTest(PassCase):
             handler = authserver.AuthHandler.__new__(authserver.AuthHandler)
             dev, _ = handler._mint_browser_device_locked("Front data", [APP], "guest")
             authserver.save_state_locked()
-        env = dict(os.environ, CUSH_AUTH_URL=f"http://127.0.0.1:{self.port}")
+        env = dict(os.environ, PORCH_AUTH_URL=f"http://127.0.0.1:{self.port}")
         r = subprocess.run([sys.executable, self.ADMIN, "--data", self.tmp.name, "list"],
                            capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -2037,7 +2037,7 @@ class CliThroughApiTest(PassCase):
         # While the lock is held exclusively, the CLI waits.
         lock = authserver.devices_lock(authserver.DEVICES_PATH, exclusive=True)
         lock.__enter__()
-        env = dict(os.environ, CUSH_AUTH_URL=dead)
+        env = dict(os.environ, PORCH_AUTH_URL=dead)
         proc = subprocess.Popen([sys.executable, self.ADMIN, "revoke", dev["id"], "--yes",
                                  "--data", self.tmp.name], env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

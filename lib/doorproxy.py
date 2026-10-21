@@ -1126,7 +1126,7 @@ def main(argv=None):
     p.add_argument('--port', type=int, required=True)
     p.add_argument('--bind', default='127.0.0.1')
     p.add_argument('--state-dir', default=door_state.STATE_DIR)
-    p.add_argument('--devices', default=None, help='cush-auth devices.json (owner passes)')
+    p.add_argument('--devices', default=None, help='porch-auth devices.json (owner passes)')
     p.add_argument('--grace', type=float, default=GRACE)
     p.add_argument('--inspect', action='store_true', help='record exchanges (masked)')
     p.add_argument('--inspect-raw', action='store_true', help='record exchanges unmasked')

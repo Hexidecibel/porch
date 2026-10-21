@@ -195,7 +195,7 @@ class HardenedHandlerMixin:
     """
 
     timeout = 60                  # per-read socket timeout, on top of the deadline
-    server_version = 'cush-tools'
+    server_version = 'porch'
     sys_version = ''
 
     def handle_one_request(self):

@@ -1,7 +1,7 @@
 """Pocket's control-plane API (lib/pocket_doors.py, lib/pocket_people.py,
 lib/pocket_audit.py, the route table in lib/pocketserver.py): doors over a
 temp state dir with fake launchers, the inspector on a temp store, people
-through a fake cush-auth, AuthWatcher diffs with an injected clock and a
+through a fake porch-auth, AuthWatcher diffs with an injected clock and a
 fake push, CSRF, the CLI token refused, nothing secret in the logs."""
 
 import json
@@ -622,7 +622,7 @@ class PublicPathTests(Base):
                      {"host": "a.example.com", "path": "/s/", "app": "a", "why": "w" * 121}):
             r, out = self.fx.post("/api/people/public-paths", body, stepup=tok)
             self.assertEqual(r.status, 400, body)
-        # cush-auth's own refusal comes back as its message.
+        # porch-auth's own refusal comes back as its message.
         r, out = self.fx.post("/api/people/public-paths",
                               {"host": "a.example.com", "path": "/", "app": "a"}, stepup=tok)
         self.assertEqual(r.status, 400)

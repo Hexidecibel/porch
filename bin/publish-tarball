@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 #
-# publish-tarball — rebuild and republish the cush-tools repo tarball that
-# site/install.sh fetches from https://tunnel.cush.rocks/cush-tools.tar.gz.
+# publish-tarball — rebuild and republish the Porch tarball that the landing
+# page's installers fetch: https://tunnel.cush.rocks/porch.tar.gz (the name of
+# the GitHub release asset too), plus an identical cush-tools.tar.gz, the old
+# name, for installers already in the wild.
 #
 # Called automatically by bin/deploy. Can also be invoked directly.
 #
 # Usage: bin/publish-tarball              build + publish to /var/www/tunnel/
 #        bin/publish-tarball --out FILE   build into FILE only (no sudo, no publish)
-#        bin/publish-tarball --out FILE --prefix porch   top-level dir (default cush-tools;
-#                                         bin/release builds porch.tar.gz with porch/)
+#        bin/publish-tarball --out FILE --prefix NAME   top-level dir (default porch;
+#                                         every installer flattens a single top dir)
 #
-# Next to the tarball (or FILE) it writes cush-tools.tar.gz.sha256 (FILE.sha256),
-# "<hex>  <file name>", which site/porch.sh checks before unpacking.
+# Next to each tarball (or FILE) it writes <name>.sha256 (FILE.sha256),
+# "<hex>  <file name>", which site/porch.sh and site/install.sh check.
 #
 # Paths in share/public-exclude.txt (CLAUDE.md, todo.md, .claude/, the private
 # marker list, ...) never ship: the tarball has at most what the public repo has.
@@ -27,11 +29,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="${PORCH_WEB_ROOT:-/var/www/tunnel}/cush-tools.tar.gz"
+WEB_ROOT="${PORCH_WEB_ROOT:-/var/www/tunnel}"
+DEST="$WEB_ROOT/porch.tar.gz"
+# The old name: installers rendered before the rename fetch this one.
+LEGACY_DEST="$WEB_ROOT/cush-tools.tar.gz"
 SUDO=sudo
 [[ -w "$(dirname "$DEST")" ]] && SUDO=""
 OUT=""
-PREFIX="cush-tools"
+PREFIX="porch"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,13 +47,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ "$PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "bad --prefix: $PREFIX" >&2; exit 2; }
-SUMNAME="cush-tools.tar.gz"
+SUMNAME="porch.tar.gz"
 [[ -n "$OUT" ]] && SUMNAME="$(basename "$OUT")"
 
 TMPDIR_PT="$(mktemp -d)"
 cleanup() { rm -rf "$TMPDIR_PT"; }
 trap cleanup EXIT
-TARBALL="$TMPDIR_PT/cush-tools.tar.gz"
+TARBALL="$TMPDIR_PT/porch.tar.gz"
 LIST="$TMPDIR_PT/files"
 
 # The allowlist (lib/porch_files.py): in a git checkout, what git knows
@@ -101,26 +106,32 @@ fi
 
 # The checksum site/porch.sh (and site/install.sh) verify: "<hex>  <file name>".
 HEX="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
-printf '%s  %s\n' "$HEX" "$SUMNAME" > "$TMPDIR_PT/cush-tools.tar.gz.sha256"
+printf '%s  %s\n' "$HEX" "$SUMNAME" > "$TMPDIR_PT/porch.tar.gz.sha256"
 
 # Installs are atomic: copy next to the target, then rename over it, the
 # tarball first and its .sha256 right after.
 if [[ -n "$OUT" ]]; then
     cp "$TARBALL" "$OUT.tmp.$$"
     mv -f "$OUT.tmp.$$" "$OUT"
-    cp "$TMPDIR_PT/cush-tools.tar.gz.sha256" "$OUT.sha256.tmp.$$"
+    cp "$TMPDIR_PT/porch.tar.gz.sha256" "$OUT.sha256.tmp.$$"
     mv -f "$OUT.sha256.tmp.$$" "$OUT.sha256"
     echo "✓ built $OUT ($(stat -c '%s' "$OUT") bytes, sha256 $HEX) + $OUT.sha256"
     exit 0
 fi
 
-echo "→ publishing → $DEST"
-$SUDO install -m 644 "$TARBALL" "$DEST.tmp.$$"
-$SUDO mv -f "$DEST.tmp.$$" "$DEST"
-$SUDO install -m 644 "$TMPDIR_PT/cush-tools.tar.gz.sha256" "$DEST.sha256.tmp.$$"
-$SUDO mv -f "$DEST.sha256.tmp.$$" "$DEST.sha256"
-echo "✓ published $DEST.sha256 ($HEX)"
-
-SIZE="$(stat -c '%s' "$DEST")"
-MTIME="$(date -u -r "$DEST" +'%Y-%m-%dT%H:%M:%SZ')"
-echo "✓ published $DEST (${SIZE} bytes, mtime ${MTIME})"
+publish() {  # publish DEST: the tarball, then its .sha256 naming DEST's file
+    local dest="$1"
+    printf '%s  %s\n' "$HEX" "$(basename "$dest")" > "$TMPDIR_PT/sum"
+    echo "→ publishing → $dest"
+    $SUDO install -m 644 "$TARBALL" "$dest.tmp.$$"
+    $SUDO mv -f "$dest.tmp.$$" "$dest"
+    $SUDO install -m 644 "$TMPDIR_PT/sum" "$dest.sha256.tmp.$$"
+    $SUDO mv -f "$dest.sha256.tmp.$$" "$dest.sha256"
+    echo "✓ published $dest.sha256 ($HEX)"
+    local size mtime
+    size="$(stat -c '%s' "$dest")"
+    mtime="$(date -u -r "$dest" +'%Y-%m-%dT%H:%M:%SZ')"
+    echo "✓ published $dest (${size} bytes, mtime ${mtime})"
+}
+publish "$DEST"
+publish "$LEGACY_DEST"

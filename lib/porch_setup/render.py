@@ -42,10 +42,13 @@ NGINX_LANDING_PORT = 8091
 PROFILES = {
     "fresh": {"landing": "static", "edge_gate": False, "apex": False, "relay": False,
               "hsts": "max-age=31536000",
-              "cert_path": "{cert_dir}/porch-{root}.pem"},
+              "cert_path": "{cert_dir}/porch-{root}.pem",
+              "auth_backend": "porch_auth"},
     "adopt": {"landing": "nginx", "edge_gate": True, "apex": True, "relay": False,
               "hsts": "max-age=31536000",
-              "cert_path": "/etc/ssl/ssl-certs/{root}"},
+              "cert_path": "/etc/ssl/ssl-certs/{root}",
+              # this box's live config names the auth backend cush_auth (legacy)
+              "auth_backend": "cush_auth"},
 }
 
 UNITS = ("porch-auth", "porch-frps", "porch-status", "porch-shortener", "porch-landing")

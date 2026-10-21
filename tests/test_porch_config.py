@@ -305,20 +305,21 @@ class SiteRenderTest(unittest.TestCase):
         self.assertIn(f'INSTALLER_URL="{porch_config.RAW_INSTALLER_URL}"', porch)
         client = self.read_site("install.sh")
         self.assertNotIn("cush.rocks", client)
-        self.assertIn(f'CUSH_AUTH_URL="${{CUSH_AUTH_URL:-{porch_config.LANDING_MARK}}}"', client)
+        self.assertIn(f'PORCH_AUTH_URL="${{PORCH_AUTH_URL:-${{CUSH_AUTH_URL:-{porch_config.LANDING_MARK}}}}}"',
+                      client)
 
     def test_rendered_installers_use_the_landing_host(self):
         o = porch_config.load(env={"PORCH_CONFIG": "none", "PORCH_DOMAIN": "example.org"})
         porch = porch_config.site_render(self.read_site("porch.sh"), o)
-        self.assertIn('PORCH_TARBALL="${PORCH_TARBALL:-https://tunnel.example.org/cush-tools.tar.gz}"', porch)
+        self.assertIn('PORCH_TARBALL="${PORCH_TARBALL:-https://tunnel.example.org/porch.tar.gz}"', porch)
         self.assertIn('INSTALLER_URL="https://tunnel.example.org/porch.sh"', porch)
         client = porch_config.site_render(self.read_site("install.sh"), o)
-        self.assertIn('CUSH_AUTH_URL="${CUSH_AUTH_URL:-https://tunnel.example.org}"', client)
-        self.assertIn('CUSH_REPO_TARBALL="${CUSH_REPO_TARBALL:-https://tunnel.example.org/cush-tools.tar.gz}"',
-                      client)
+        self.assertIn('PORCH_AUTH_URL="${PORCH_AUTH_URL:-${CUSH_AUTH_URL:-https://tunnel.example.org}}"', client)
+        self.assertIn('PORCH_REPO_TARBALL="${PORCH_REPO_TARBALL:-${CUSH_REPO_TARBALL:-'
+                      'https://tunnel.example.org/porch.tar.gz}}"', client)
         # the author's own box renders to its own landing page too
         d = porch_config.load(env=NOFILE)
-        self.assertIn("https://tunnel.cush.rocks/cush-tools.tar.gz",
+        self.assertIn("https://tunnel.cush.rocks/porch.tar.gz",
                       porch_config.site_render(self.read_site("porch.sh"), d))
 
     def test_identity_on_default_and_swap_on_other(self):

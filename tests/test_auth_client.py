@@ -1,4 +1,4 @@
-"""Tests for lib/auth_client.py against a fake cush-auth on a loopback thread
+"""Tests for lib/auth_client.py against a fake porch-auth on a loopback thread
 server (never the live one)."""
 
 import json
@@ -159,7 +159,7 @@ class ClientTest(unittest.TestCase):
         os.unlink(os.path.join(self.dir, auth_client.CLI_TOKEN_FILENAME))
         with self.assertRaises(auth_client.TokenError) as c:
             self.c.state()
-        self.assertIn("is cush-auth running?", c.exception.message)
+        self.assertIn("is porch-auth running?", c.exception.message)
         self.write_token("")
         with self.assertRaises(auth_client.TokenError) as c:
             self.c.state()
@@ -187,12 +187,12 @@ class ClientTest(unittest.TestCase):
         self.assertIn("could not reach authserver at http://127.0.0.1:9", str(c.exception))
 
     def test_env_url_read_at_call_time(self):
-        saved = os.environ.get("CUSH_AUTH_URL")
-        self.addCleanup(lambda: os.environ.pop("CUSH_AUTH_URL") if saved is None
-                        else os.environ.__setitem__("CUSH_AUTH_URL", saved))
-        os.environ["CUSH_AUTH_URL"] = self.url
+        saved = os.environ.get("PORCH_AUTH_URL")
+        self.addCleanup(lambda: os.environ.pop("PORCH_AUTH_URL") if saved is None
+                        else os.environ.__setitem__("PORCH_AUTH_URL", saved))
+        os.environ["PORCH_AUTH_URL"] = self.url
         self.assertEqual(auth_client.Client(self.dir).state()["devices"][0]["id"], "d1")
-        os.environ["CUSH_AUTH_URL"] = "http://127.0.0.1:9"
+        os.environ["PORCH_AUTH_URL"] = "http://127.0.0.1:9"
         t = time.time()
         with self.assertRaises(auth_client.AuthDown):
             auth_client.Client(self.dir).state()

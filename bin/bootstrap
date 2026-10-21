@@ -329,7 +329,7 @@ def main():
     default_name = socket.gethostname() or "device"
 
     parser = argparse.ArgumentParser(
-        description="Pair this machine with a cush-tools auth server and write config/frpc.toml."
+        description="Pair this machine with a Porch auth server and write config/frpc.toml."
     )
     parser.add_argument("--auth-url", default=DEFAULT_AUTH_URL,
                         help="Base URL of your Porch server's landing page, e.g. "

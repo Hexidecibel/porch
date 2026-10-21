@@ -99,8 +99,8 @@ frontend www-https
 	acl public_ok var(txn.cush_public) -m bool
 ## @fragment routing_auth
 	use_backend letsencrypt-backend if letsencrypt-acl
-	use_backend cush_auth if host_auth
-	use_backend cush_auth if porch_path
+	use_backend ${auth_backend} if host_auth
+	use_backend ${auth_backend} if porch_path
 ## @fragment gate
 	# Domain-wide cush_auth edge gate (adopted installs only).
 	http-request set-var(txn.cush_tok) req.cook(cush_auth),sha2(256),hex,lower
@@ -133,7 +133,7 @@ frontend www-https
 	acl landing_auth path_beg /auth/
 	acl landing_api path_beg /api/
 	acl landing_short path_beg /l/
-	use_backend cush_auth if tunnelroot landing_auth
+	use_backend ${auth_backend} if tunnelroot landing_auth
 	use_backend panel if tunnelroot landing_api
 	use_backend shortener if tunnelroot landing_short
 ## @fragment routing
@@ -164,8 +164,8 @@ backend panel
 backend tunnelroot
 	server tunnelroot 127.0.0.1:${landing_port}
 
-backend cush_auth
-	server cush_auth 127.0.0.1:${auth_port}
+backend ${auth_backend}
+	server ${auth_backend} 127.0.0.1:${auth_port}
 ## @fragment backends_apex
 
 backend cushroot

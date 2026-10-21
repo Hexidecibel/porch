@@ -95,7 +95,7 @@ from pocket_links import (  # noqa: E402,F401  (moved; re-exported)
     LINK_EXPIRY, MAX_LINK_OPENS, link_slug,
 )
 import pocket_assets  # noqa: E402  (hashed /static/ table)
-import auth_client  # noqa: E402  (cush-auth's CLI-token API)
+import auth_client  # noqa: E402  (porch-auth's CLI-token API)
 import door_ops  # noqa: E402  (the door control plane, shared with statusserver)
 from door_ops import DoorOpError  # noqa: E402
 from pocket_audit import AuditLog  # noqa: E402,F401
@@ -1798,7 +1798,7 @@ def main():
                         help='door name (CLI token file, page title)')
     parser.add_argument('--bind', type=str, default='127.0.0.1')
     parser.add_argument('--devices', type=str, default='',
-                        help='cush-auth devices.json (without it nobody can open the pocket)')
+                        help='porch-auth devices.json (without it nobody can open the pocket)')
     parser.add_argument('--no-cli-token', action='store_true',
                         help='do not write a token for `porch clip`')
     parser.add_argument('--max-file-mb', type=int, default=MAX_FILE_SIZE // (1024 * 1024))
@@ -1814,7 +1814,7 @@ def main():
     parser.add_argument('--rp-origin', type=str, default='',
                         help='WebAuthn origin (default: https://<rp-id>)')
     parser.add_argument('--no-auth-watcher', action='store_true',
-                        help='do not poll cush-auth (no pairing/invite notifications)')
+                        help='do not poll porch-auth (no pairing/invite notifications)')
     args = parser.parse_args()
 
     base = Path(args.dir).resolve()
@@ -1856,7 +1856,7 @@ def main():
     H.brand = brand
     H.init_stepup(base, rp_id, (args.rp_origin or f'https://{rp_id}').rstrip('/'))
     if H.devices_path:
-        # The CLI token cush-auth writes next to devices.json (data/.admin-cli-token).
+        # The CLI token porch-auth writes next to devices.json (data/.admin-cli-token).
         H.auth = auth_client.Client(os.path.dirname(H.devices_path))
         if not args.no_auth_watcher:
             H.watcher = make_watcher(H, base)
@@ -1878,7 +1878,7 @@ def main():
     server = make_server(H, args.port, args.bind, tag='pocketserver',
                          max_connections=max(SSE_MAX_TOTAL + 8, args.max_connections))
     sys.stderr.write(f"[pocketserver] Listening on {args.bind}:{args.port}, pocket at {base} "
-                     f"[{'owner via cush-auth' if args.devices else 'no --devices: nobody can open it'}]\n")
+                     f"[{'owner via porch-auth' if args.devices else 'no --devices: nobody can open it'}]\n")
     try:
         server.serve_forever()
     except (KeyboardInterrupt, SystemExit):

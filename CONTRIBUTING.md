@@ -117,6 +117,37 @@ rolls back and deletes everything tagged `porch-e2e` (`--keep` leaves it up;
 - Add or update tests with every change, and update the docs that describe
   what you changed (`README.md`, `docs/`).
 
+## Why some things say cush
+
+Porch started life as *cush-tools*. Everything a new user types or reads says
+porch now, but a few names stay as they were, because live installs, paired
+machines and other projects depend on them:
+
+- **Wire and storage names**: the `cush_auth` cookie, the `X-Cush-*`
+  identity headers and the `cush_tok` / `cush_host` HAProxy variables, the
+  HAProxy map files (`/etc/haproxy/maps/cush-*.map`), the `.cush-secrets`
+  manifest (and its `.materialized/` and `.bak` siblings) in your projects,
+  and internal Python modules and shell function names (`lib/cush_secrets.py`,
+  `cush_daemonize`, ...). Renaming any of these would log people out, break
+  the edge gate, or orphan files in other repos.
+- **Units on older hand-made installs**: `config/cush-auth.service` and
+  `config/cush-shortener.service`. `porch setup` installs `porch-*` user
+  units instead; on an adopted install the HAProxy auth backend keeps its old
+  name `cush_auth` (fresh renders call it `porch_auth`).
+- **Compatibility names**: `bin/cush-init`, `bin/cush-audit`,
+  `bin/cush-hooks-install` (and the other `bin/cush-*`) run their `bin/porch-*`
+  counterparts; `hooks/pre-commit-cush` runs `hooks/pre-commit-porch` for
+  hooks installed as symlinks to it. Every `CUSH_*` environment variable a user
+  could set (`CUSH_AUTH_URL`, `CUSH_DIR`, `CUSH_FORCE`, `CUSH_REPO_TARBALL`,
+  `CUSH_HISTORY_FILE`, ...) is still read when its `PORCH_*` name is unset.
+  Per-user config moved to `~/.config/porch/`; a file only found in
+  `~/.config/cush-tools/` is still used. Landing pages publish
+  `cush-tools.tar.gz` next to `porch.tar.gz`, and `site/install.sh` keeps
+  using an existing `~/cush-tools`.
+
+New code uses porch names. Keep the compatibility paths until nothing in the
+wild needs them, and say so in a comment where you add one.
+
 ## Cutting a release
 
 Releases are GitHub releases of `Hexidecibel/porch`. The public tree is
@@ -165,7 +196,7 @@ bin/            launchers and operator scripts
   deploy, publish-tarball                landing page, installers, tarball
   public-export, release, public-pull    the public repo and GitHub releases
   haproxy-apply, haproxy-porch           validated HAProxy installs
-  inject, stash, cush-init, cush-audit   secrets tooling
+  inject, stash, porch-init, porch-audit   secrets tooling
   test                                   the test suite
 lib/
   porch_http.py, porch_auth.py, porch_config.py   shared HTTP core, the owner

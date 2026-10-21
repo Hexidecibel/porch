@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI for managing the cush-tools device registry (data/devices.json).
+"""CLI for managing the Porch device registry (data/devices.json).
 
 Every mutation goes through the running authserver (HTTP on 127.0.0.1:9512,
 authenticated with the token it writes to data/.admin-cli-token on start).
@@ -49,9 +49,10 @@ SESSION_SECRET_BYTES = 32
 
 DEFAULT_SERVER_ADDR = ''
 
-# CUSH_AUTH_URL overrides it (tests). Must stay a loopback URL: the server
+# PORCH_AUTH_URL (old name: CUSH_AUTH_URL) overrides it (tests). Must stay a loopback URL: the server
 # ignores the CLI token on anything that looks proxied.
-AUTH_URL = os.environ.get('CUSH_AUTH_URL', 'http://127.0.0.1:9512')
+AUTH_URL = (os.environ.get('PORCH_AUTH_URL') or os.environ.get('CUSH_AUTH_URL')
+            or 'http://127.0.0.1:9512')
 CLI_TOKEN_FILENAME = auth_client.CLI_TOKEN_FILENAME
 CLI_TOKEN_HEADER = auth_client.CLI_TOKEN_HEADER
 DEFAULT_SERVER_PORT = 7000
@@ -322,7 +323,7 @@ def cmd_revoke(args):
                     return
             die("device vanished")
         offline_mutate(args, fn)
-        log("HAProxy maps are rewritten when cush-auth next starts")
+        log("HAProxy maps are rewritten when porch-auth next starts")
     print(f"Revoked '{device.get('name')}' ({device.get('id')}).")
     return 0
 
@@ -539,7 +540,7 @@ def api(args, method, path, body=None):
         msg = e.message
         if e.status == 401:
             msg = msg or 'unauthorized'
-            msg += ' (stale token? cush-auth rewrites it on every start)'
+            msg += ' (stale token? porch-auth rewrites it on every start)'
         die(f"server said {e.status}: {msg or e.reason}")
     except auth_client.AuthDown as e:
         die(str(e))
@@ -821,7 +822,7 @@ def _add_data_arg(parser, top=False):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog='auth-admin',
-        description='Manage the cush-tools device registry (data/devices.json).',
+        description='Manage the Porch device registry (data/devices.json).',
     )
     _add_data_arg(parser, top=True)
     sub = parser.add_subparsers(dest='cmd', metavar='<command>')

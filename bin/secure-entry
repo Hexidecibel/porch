@@ -147,7 +147,7 @@ fi
 
 # ── Deprecation nudge for --save-to-op ──────────────────────────────────────
 # Print a one-time stderr note when the legacy flag is used. Doesn't fail —
-# the alias still works for back-compat with cush-tools call sites that
+# the alias still works for back-compat with older call sites that
 # haven't been updated yet (and external scripts).
 if [ -n "$SAW_LEGACY_SAVE_TO_OP" ]; then
     echo "secure-entry: note: --save-to-op is deprecated; use --save-to-secrets (accepts op:// or inf://) instead." >&2
@@ -247,9 +247,10 @@ fi
 # write succeeded (or get a clear error in the form's response).
 if [ -n "$SAVE_TO_SECRETS" ]; then
     # shellcheck source=../lib/op.sh
-    [ -f "$HOME/.config/cush-tools/op.env" ] && . "$TUNNEL_DIR/lib/op.sh"
+    . "$TUNNEL_DIR/lib/porch-user-config.sh"
+    [ -f "$(porch_user_config_file op.env)" ] && . "$TUNNEL_DIR/lib/op.sh"
     # shellcheck source=../lib/infisical.sh
-    [ -f "$HOME/.config/cush-tools/infisical.env" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+    [ -f "$(porch_user_config_file infisical.env)" ] && . "$TUNNEL_DIR/lib/infisical.sh"
 fi
 
 # ── Backend CLI check ──────────────────────────────────────────────────────

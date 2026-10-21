@@ -1,0 +1,97 @@
+#!/bin/bash
+# Migrate a project's .cush-secrets from op:// refs to inf:// refs.
+#
+# Walks the manifest, reads every op:// value from 1Password, pushes each one
+# to Infisical at inf://<env>/<project>/<KEY>, then rewrites the manifest in
+# place with the new refs (after writing a .cush-secrets.bak first). Verifies
+# the round-trip with `bin/inject --check` before exiting.
+#
+# Read-only on the .cush-secrets manifest until the very end of the run, and
+# never rewrites if any read or write step fails. On verify-after-write
+# failure the manifest is rewritten but the .bak is retained — restore from
+# .bak to roll back manually.
+#
+# Requires both backends to be authenticated:
+#   - 1Password: ~/.config/porch/op.env  (or `eval $(op signin)`)
+#   - Infisical: ~/.config/porch/infisical.env (universal-auth)
+#
+# Per-scheme auth is checked inside Python — a failure on either side prints
+# a backend-specific hint and exits 3.
+
+set -euo pipefail
+
+TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source both backend shims so OP_* and INFISICAL_* env vars are loaded into
+# this shell (and therefore inherited by python). Each shim is conditional on
+# its env file existing; sourcing them also runs cheap setup (no auth probe).
+# The Python layer does the actual auth check per scheme.
+# shellcheck source=../lib/op.sh
+. "$TUNNEL_DIR/lib/porch-user-config.sh"
+[ -f "$(porch_user_config_file op.env)" ] && . "$TUNNEL_DIR/lib/op.sh"
+# shellcheck source=../lib/infisical.sh
+[ -f "$(porch_user_config_file infisical.env)" ] && . "$TUNNEL_DIR/lib/infisical.sh"
+
+show_help() {
+    cat <<'EOF'
+Usage: bin/porch-migrate-backend [PROJECT_DIR] [options]
+
+Migrate a project's .cush-secrets from op:// refs to inf:// refs. Reads each
+value from 1Password, pushes to Infisical, then rewrites the manifest. Safe:
+backs up the old manifest as .cush-secrets.bak and verifies the rewrite via
+`bin/inject --check`.
+
+  bin/porch-migrate-backend                       # migrate the cwd's project
+  bin/porch-migrate-backend ./myapp               # migrate a specific project
+  bin/porch-migrate-backend --dry-run             # preview, no writes
+  bin/porch-migrate-backend --target-env staging  # push to Infisical's `staging` env
+  bin/porch-migrate-backend --no-keep-bak         # delete .cush-secrets.bak on success
+
+Options:
+  --dry-run                       Preview the plan; no writes to 1P, Infisical,
+                                  or disk.
+  --target-env ENV                Target Infisical env slug (default: dev).
+  --target-path-template TMPL     inf:// path template (default: '/{project}',
+                                  where {project} = the manifest's parent
+                                  dir basename).
+  --keep-bak                      Keep .cush-secrets.bak after success (default).
+  --no-keep-bak                   Delete .cush-secrets.bak after verified success.
+  --no-validate                   Skip the post-migration `bin/inject --check`.
+  --keep-orphans                  Skip the pre-flight orphan cleanup. By
+                                  default, any inf:// secret at the
+                                  destination path that's not in the
+                                  manifest is deleted (typically stale
+                                  state from a prior failed run).
+  --clean-only                    Run the orphan cleanup and exit; do
+                                  NOT migrate. Useful for fixing partial
+                                  state without committing to a fresh
+                                  migration.
+  --json                          Machine-readable output.
+  --self-test                     Run an in-process smoke test (no real
+                                  backend calls).
+  -h, --help                      Show this help.
+
+Exit codes:
+  0  success (or already-migrated no-op)
+  2  argument or manifest error
+  3  backend auth failure (op or inf)
+  4  failed to read all source values from 1Password
+  5  failed to write to Infisical (rollback attempted)
+  6  verify-after-write mismatch (rollback attempted)
+  7  manifest write failed
+  9  post-migration `bin/inject --check` failed
+EOF
+}
+
+# Parse --help / -h before dispatching, so we can print without an auth check.
+for a in "$@"; do
+    case "$a" in
+        -h|--help) show_help; exit 0 ;;
+    esac
+done
+
+# Forward all args to lib/migrate.py. The python layer handles flag parsing,
+# manifest loading, AND per-scheme auth probing — so adding a new backend or
+# a new flag only requires a python edit, not a bash edit. --self-test is
+# also handled inside the python layer.
+exec python3 "$TUNNEL_DIR/lib/migrate.py" "$@"

@@ -73,7 +73,7 @@ def _load_secrets():
     return _secrets
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent  # cush-tools/
+REPO_ROOT = Path(__file__).resolve().parent.parent  # the repo root
 SECURE_ENTRY_BIN = REPO_ROOT / "bin" / "secure-entry"
 QR_BIN = REPO_ROOT / "bin" / "qr"
 STATUS_BIN = REPO_ROOT / "bin" / "status"
@@ -711,9 +711,9 @@ def _check_auth_for_manifest(manifest_obj, *, json_out: bool) -> int:
             # scheme-specific hint so the user knows which backend to fix.
             hint = {
                 "op": "1Password (`op`) is not authenticated. "
-                      "Configure ~/.config/cush-tools/op.env or run `op signin`.",
+                      "Configure ~/.config/porch/op.env or run `op signin`.",
                 "inf": "Infisical is not authenticated. "
-                      "Configure ~/.config/cush-tools/infisical.env (universal-auth).",
+                      "Configure ~/.config/porch/infisical.env (universal-auth).",
             }.get(scheme, f"backend {scheme!r} not authenticated")
             _print_auth_or_vault_error(hint, kind="auth", json_out=json_out)
             return 3

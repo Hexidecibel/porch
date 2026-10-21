@@ -7,7 +7,7 @@
 #
 # Anyone with the link can browse, play, download and ADD photos/video.
 # Deleting and reordering are unlocked automatically for the owner — any
-# browser enrolled with cush-auth (it carries the .cush.rocks cush_auth
+# browser enrolled with porch-auth (it carries the .cush.rocks cush_auth
 # cookie). No key to manage, and guests never see a delete button.
 #
 # --view-only takes guests down to watching: the server refuses their uploads
@@ -41,7 +41,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
   echo ""
   echo "Start a media-collect server (photos + video) and expose it via tunnel."
   echo "Anyone with the link can browse the gallery, play video, download, and"
-  echo "add their own photos/video. The owner — any cush-auth-enrolled browser —"
+  echo "add their own photos/video. The owner — any browser enrolled with porch-auth —"
   echo "automatically gets delete + drag-to-reorder; guests get view & add only."
   echo ""
   echo "--view-only: guests can browse and play but not upload or download."
@@ -112,7 +112,7 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# Start the media server in the background. --devices points at the cush-auth
+# Start the media server in the background. --devices points at the porch-auth
 # registry so the owner's enrolled browser is recognized automatically; without
 # a match nobody is an owner, so the gallery stays view+add only (fail closed).
 # With --view-only and no match, nobody can add either: the gallery is frozen.

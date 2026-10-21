@@ -1,5 +1,5 @@
 """Pocket's side of Ask for access (lib/pocket_people.py): the requests list,
-Allow (★ step-up) / Deny through the fake cush-auth, the counts, the
+Allow (★ step-up) / Deny through the fake porch-auth, the counts, the
 watcher's `access` push, and nothing secret passed through."""
 
 import json

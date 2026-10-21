@@ -199,7 +199,7 @@ class SecretStore:
         name = type(e).__name__
         mro = {c.__name__ for c in type(e).__mro__}
         cli = "infisical" if scheme == "inf" else "op"
-        cfg = "~/.config/cush-tools/infisical.env" if scheme == "inf" else "~/.config/cush-tools/op.env"
+        cfg = "~/.config/porch/infisical.env" if scheme == "inf" else "~/.config/porch/op.env"
         if "SecretsRefNotFound" in mro and not writing:
             return SecretNotFound(f"{scheme}:// secret not found (check the vault/project, path and key)")
         if "SecretsAuthError" in mro:

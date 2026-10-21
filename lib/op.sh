@@ -1,7 +1,8 @@
 # lib/op.sh — sourced shim for 1Password CLI integration
 # Usage: source "$(dirname "$0")/../lib/op.sh"
 #
-# Loads credentials from ~/.config/cush-tools/op.env (if present) and defines:
+# Loads credentials from ~/.config/porch/op.env (or the pre-rename
+# ~/.config/cush-tools/op.env, if present) and defines:
 #   - cush_op_check        verify op is usable; exits 3 on auth failure, 4 on other op errors
 #   - cush_op_setup_hint   one-screen setup instructions
 #   - cush_op              thin wrapper around `op`
@@ -27,7 +28,10 @@ if [ -n "${_CUSH_OP_SH_LOADED:-}" ]; then
 fi
 _CUSH_OP_SH_LOADED=1
 
-_CUSH_OP_ENV_FILE="${CUSH_OP_ENV_FILE:-$HOME/.config/cush-tools/op.env}"
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/porch-user-config.sh"
+# PORCH_OP_ENV_FILE wins; CUSH_OP_ENV_FILE is its old name.
+_CUSH_OP_ENV_FILE="${PORCH_OP_ENV_FILE:-${CUSH_OP_ENV_FILE:-$(porch_user_config_file op.env)}}"
 _CUSH_OP_SHORTHAND="cush"
 # Tracks whether we've already validated a session in this shell, so repeat
 # calls to cush_op_check don't re-signin gratuitously.
@@ -58,19 +62,19 @@ cush_op_setup_hint() {
 
 [1Password setup needed]
 
-cush-tools needs to authenticate to 1Password. Pick the option that matches
+Porch needs to authenticate to 1Password. Pick the option that matches
 your plan:
 
 # Option A — Stored credentials (works on any 1Password plan, including Family/Personal)
 
-  mkdir -p ~/.config/cush-tools && chmod 700 ~/.config/cush-tools
-  cat > ~/.config/cush-tools/op.env <<'OPENV'
+  mkdir -p ~/.config/porch && chmod 700 ~/.config/porch
+  cat > ~/.config/porch/op.env <<'OPENV'
   export OP_SUBDOMAIN=my              # the subdomain in your 1password.com URL
   export OP_EMAIL=you@example.com
   export OP_SECRET_KEY=A3-XXXXXX-...  # from 1password.com -> My Profile -> Get the app
   export OP_MASTER_PASSWORD='your-master-password'
   OPENV
-  chmod 600 ~/.config/cush-tools/op.env
+  chmod 600 ~/.config/porch/op.env
 
   Tip: wrap the master password in single quotes, not double, to avoid shell
   expansion of $, !, `, and \ characters.
@@ -79,10 +83,10 @@ your plan:
 
   https://developer.1password.com/docs/service-accounts/
 
-  mkdir -p ~/.config/cush-tools && chmod 700 ~/.config/cush-tools
+  mkdir -p ~/.config/porch && chmod 700 ~/.config/porch
   echo 'export OP_SERVICE_ACCOUNT_TOKEN=ops_REPLACE_ME' \
-      > ~/.config/cush-tools/op.env
-  chmod 600 ~/.config/cush-tools/op.env
+      > ~/.config/porch/op.env
+  chmod 600 ~/.config/porch/op.env
 
 # In both cases
 

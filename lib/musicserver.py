@@ -1127,7 +1127,7 @@ class MusicHandler(HardenedHandlerMixin, BaseHTTPRequestHandler):
         """CSRF check for writes (porch_http.same_origin). The cookie alone is
         not enough: the legacy cush_auth cookie is issued for the whole
         .cush.rocks domain, so a SameSite=Lax cookie rides along on a POST from
-        any sibling cush tool. This pins a write to this collection's page."""
+        any sibling Porch tool. This pins a write to this collection's page."""
         return same_origin(self)
 
     def _safe_target(self, raw):
@@ -1517,7 +1517,7 @@ def main():
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--dir', type=str, required=True)
     parser.add_argument('--devices', type=str, default='',
-                        help='path to cush-auth devices.json; owners (enrolled '
+                        help='path to porch-auth devices.json; owners (enrolled '
                              'browsers) get upload/delete/reorder rights')
     parser.add_argument('--title', type=str, default='Music')
     parser.add_argument('--max-file-mb', type=int, default=MAX_FILE_SIZE // (1024 * 1024))

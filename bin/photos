@@ -27,7 +27,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
   echo "Start a photo-collect server and expose it via tunnel."
   echo "Anyone with the link can view and add photos, which appear in a live"
   echo "gallery. Deleting and drag-to-reorder are owner-only: unlocked for any"
-  echo "cush-auth-enrolled browser (same gate as bin/media); guests view & add."
+  echo "browser enrolled with porch-auth (same gate as bin/media); guests view & add."
   echo ""
   echo "Examples:"
   echo "  photos              -> random subdomain (e.g. photos-a1b2c3.${PORCH_TUNNEL_BASE})"
@@ -84,7 +84,7 @@ trap cleanup EXIT INT TERM
 # lib/mediaserver.py is the shared gallery engine (bin/media uses it too).
 # --kinds image keeps this launcher images-only. It no longer passes --open
 # (which made everyone with the link the owner): --devices gives photos the
-# same cush-auth owner gate as bin/media, and without a match nobody can
+# same porch-auth owner gate as bin/media, and without a match nobody can
 # delete or reorder (fail closed). Loopback only: frpc is its one client.
 python3 "$TUNNEL_DIR/lib/mediaserver.py" \
     --port "$PORT" \

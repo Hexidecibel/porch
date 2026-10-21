@@ -37,10 +37,10 @@ Existing routes (clip, inbox, `/share`, `/tus/`, `/tus-sealed/`, keys, links,
   | `step_up_password` | 401 | first passkey needs a password step-up. `methods: ["password"]`, `passkeys: 0` |
   | `stepup_failed` | 401 | a step-up/registration ceremony or password check failed (generic message; the precise reason is in the audit log) |
   | `rate_limited` | 429 | `retry_after` (seconds) + `Retry-After` header |
-  | `auth_down` | 503 | cush-auth not answering / not configured / token unreadable |
-  | `auth_busy` | 503 | cush-auth's scrypt is busy (password check) |
-  | `auth_old` | 501 | cush-auth lacks the endpoint: "update cush-auth (bin/auth-deploy)" |
-  | `auth_error` | 502 | cush-auth answered something unexpected |
+  | `auth_down` | 503 | porch-auth not answering / not configured / token unreadable |
+  | `auth_busy` | 503 | porch-auth's scrypt is busy (password check) |
+  | `auth_old` | 501 | porch-auth lacks the endpoint: "update porch-auth (bin/auth-deploy)" |
+  | `auth_error` | 502 | porch-auth answered something unexpected |
   | `relaunch_needed` | 409 | rules can't switch live. `why`, `command` (exact shell command) |
   | `switch_failed` | 502 | live first-rule switch failed; rules rolled back |
   | `not_found` | 404 | |
@@ -73,7 +73,7 @@ Existing routes (clip, inbox, `/share`, `/tus/`, `/tus-sealed/`, keys, links,
 - `passkeys.count`: usable passkeys; `unusable`: stored under another rp_id
   (the pocket was renamed): re-enroll.
 - `auth.state`: `ok` | `down` (last poll failed) | `stale` (no good poll for
-  90 s) | `old` (cush-auth lacks verify-password or device-rename).
+  90 s) | `old` (porch-auth lacks verify-password or device-rename).
   `can_rename` false hides device rename; `can_verify_password` false means
   the password step-up will answer 501 `auth_old`.
 - `counts.requests` = pending reopen asks + pending pairings + pending asks for access.
@@ -197,7 +197,7 @@ Summary shape (`inspect_store.summary`): `{id, ts, ms, method, target, status, .
  "accepts":[{"invite_id":"inv_1a2b3c4d","note":"Sam","device_name":"Sam's Pixel","at":1799999900}],
  "auth":{"state":"ok|down|old|stale","can_rename":true,"can_verify_password":true}}
 ```
-Always 200: with cush-auth down, `pairings` and `access` are `[]` and `auth.state` says so.
+Always 200: with porch-auth down, `pairings` and `access` are `[]` and `auth.state` says so.
 `access`: Ask for access from the auth server's gate pages (pending + decided
 in the last 30 minutes; never a visitor token or an invite link).
 `accepts`: the last 20 invite redemptions seen by the watcher since start
@@ -213,15 +213,15 @@ in the last 30 minutes; never a visitor token or an invite link).
 ### `POST /api/requests/pairings/<code>/reject` `{}` (not ★) → `{"status":"ok"}`
 ### `POST /api/requests/access/<id>/allow` ★ `{"device_ttl_minutes"?: 1..43200 | null}`
 A `device` ask: the host is added to that browser's scope (the gate lets it
-straight in). Anyone else: cush-auth mints a single-use invite for exactly
+straight in). Anyone else: porch-auth mints a single-use invite for exactly
 that host (1 hour); its link goes only to the visitor's own poll.
 `device_ttl_minutes` makes the browser it enrolls a pass of that length.
 → `{"status":"ok","request":{...as above, state "approved", how, invite_id}}`.
 404 `not_found` (not waiting any more), 409 (the host is no longer gated;
-the ask stays pending), 501 `auth_old` (cush-auth without the endpoint).
+the ask stays pending), 501 `auth_old` (porch-auth without the endpoint).
 ### `POST /api/requests/access/<id>/deny` `{}` (not ★) → `{"status":"ok","request":{...}}`
 
-## People (through cush-auth; every field whitelisted)
+## People (through porch-auth; every field whitelisted)
 
 ### `GET /api/people`
 ```json
@@ -238,14 +238,14 @@ the ask stays pending), 501 `auth_old` (cush-auth without the endpoint).
  "auth":{"state":"ok","can_rename":true,"can_verify_password":true}}
 ```
 `role` is set for browsers, `tunnel_admin` for tunnel devices. `this`: the
-browser making the request. 503 `auth_down` / 501 `auth_old` when cush-auth
+browser making the request. 503 `auth_down` / 501 `auth_old` when porch-auth
 can't answer.
 
 ### Device writes
 - `POST /api/people/devices/<id>/revoke` `{"confirm_self"?: true}` ★ — revoking this browser needs `confirm_self` (400 `confirm_self`).
 - `POST /api/people/devices/<id>/role` `{"role":"admin|guest"}` ★ → `{"status":"ok","role":...,"tunnel_admin":bool|null}`
 - `POST /api/people/devices/<id>/apps` `{"apps":[hosts] | ["*"], "confirm_all"?: true}` ★ → `{"status":"ok","apps":[...]}`
-- `POST /api/people/devices/<id>/rename` `{"name":"1..64 printable"}` (not ★) → `{"status":"ok","name":...}`; 501 `auth_old` on an old cush-auth.
+- `POST /api/people/devices/<id>/rename` `{"name":"1..64 printable"}` (not ★) → `{"status":"ok","name":...}`; 501 `auth_old` on an old porch-auth.
 
 `<id>`: `^[A-Za-z0-9_-]{1,64}$`. 404 `not_found` for an unknown device.
 
@@ -254,7 +254,7 @@ can't answer.
   `{"note":"≤80","apps":[hosts],"landing"?:host,"standing":bool,"expires_hours":int|null,"max_uses":int,"device_ttl_minutes":int|null}`
   → **201** `{"status":"ok","invite":{...as in GET /api/people...},"url":"https://auth.cush.rocks/i/..."}`.
   The `url` is in this answer **only** (never stored, logged or audited): show
-  it once with a QR. `apps: ["*"]` is refused. cush-auth's own validation
+  it once with a QR. `apps: ["*"]` is refused. porch-auth's own validation
   (ranges, standing needs device_ttl_minutes, ...) comes back as 400.
 - `POST /api/people/invites/<id>/revoke` `{"revoke_devices": bool}` — ★ only when `revoke_devices` is true.
 
@@ -272,17 +272,17 @@ can't answer.
 - `GET /api/people/public-paths` → `{"status":"ok","public_paths":[...],"max":100}`
 - `POST /api/people/public-paths` `{"host","path","app":"1..40","why"?:"≤120"}` ★ → 201
   `{"status":"ok","entry":{...},"public_paths":[...],"haproxy":"ok"|"failed: ..."}`.
-  A path ending in `/` is a prefix. cush-auth's rules (no `/`, `..`, `//`, `%`, `/__porch…`;
+  A path ending in `/` is a prefix. porch-auth's rules (no `/`, `..`, `//`, `%`, `/__porch…`;
   host must be gated; no duplicates; at most 100) come back as 400 / 409 with its message.
 - `POST /api/people/public-paths/<id>/on` `{}` ★, `/off` `{}` (not ★), `/remove` `{}` (not ★)
   → `{"status":"ok","entry":{...}|null,"public_paths":[...],"haproxy":...}`; 404 `not_found` for an unknown id.
-  A cush-auth without the route answers 501 `auth_old`.
+  A porch-auth without the route answers 501 `auth_old`.
 
 ### Admin password
 - `POST /api/people/password` `{"current":"...","new":"12..1024 chars"}` ★.
-  `current` is checked through cush-auth's verify-password (wrong: 401
+  `current` is checked through porch-auth's verify-password (wrong: 401
   `stepup_failed`, counted in the step-up failure limits), then set-password.
-  → `{"status":"ok"}`. Logs out cush-auth's admin UI sessions.
+  → `{"status":"ok"}`. Logs out porch-auth's admin UI sessions.
 
 ## Step-up and passkeys
 
@@ -295,7 +295,7 @@ step-up sheet, run a ceremony, then retry the original request once.
 
 Failure limits (passkey and password together): 5 per 5 min per client IP,
 10 per 15 min per owner device → 429 `rate_limited` before any check.
-Options endpoints: 30 per minute per device. cush-auth adds its own password
+Options endpoints: 30 per minute per device. porch-auth adds its own password
 limit (5/min per IP), surfaced as 429 `rate_limited` (`retry_after: 60`).
 
 ### `POST /api/stepup/options` `{}`
@@ -370,7 +370,7 @@ each sent once on connect and then on change:
 |---|---|---|
 | `doors` | `{"status":"ok","now","doors":[...]}` as `GET /api/doors` | any door state file added/removed/rewritten, or a door write from Pocket |
 | `history` | the `GET /api/doors/history` array | history.jsonl or the launch recipes change (at most every 5 s) |
-| `people` | `{"devices","invites","apps","public_paths","pairings","access","accepts","auth"}` (shapes as above) | the auth watcher sees a change (from its last snapshot; no extra cush-auth call) |
+| `people` | `{"devices","invites","apps","public_paths","pairings","access","accepts","auth"}` (shapes as above) | the auth watcher sees a change (from its last snapshot; no extra porch-auth call) |
 | `stepup` | `{"active":bool,"expires_at":epoch|null,"method":"passkey"|"password"|null}` | a step-up starts, ends (`/api/stepup/end`) or runs out |
 
 The stream sends `: ping` every 15 s and is recycled after 25 min

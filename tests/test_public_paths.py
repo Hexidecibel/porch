@@ -191,7 +191,7 @@ class PublicCliTest(ta.ServerCase):
     ADMIN = os.path.join(ta._HERE, "..", "bin", "auth-admin")
 
     def run_cli(self, *args):
-        env = dict(os.environ, CUSH_AUTH_URL=f"http://127.0.0.1:{self.port}")
+        env = dict(os.environ, PORCH_AUTH_URL=f"http://127.0.0.1:{self.port}")
         return subprocess.run([sys.executable, self.ADMIN, *args, "--data", self.tmp.name],
                               capture_output=True, text=True, env=env, timeout=60)
 

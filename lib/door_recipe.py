@@ -84,7 +84,7 @@ FLAGS = {
 # Names whose directory lives in $HOME (media/music staging and the apps' own dirs).
 HOME_DIRS = {'media': 'media', 'photos': 'photos', 'music': 'music', 'drop': 'drops'}
 # Launcher env vars that must never reach a launcher we start.
-ENV_DROP = ('_CUSH_DAEMONIZED', 'CUSH_LOG_FILE', '_PORCH_DOOR_SPEC', 'TUNNEL_NO_STATE',
+ENV_DROP = ('_CUSH_DAEMONIZED', 'PORCH_LOG_FILE', 'CUSH_LOG_FILE', '_PORCH_DOOR_SPEC', 'TUNNEL_NO_STATE',
             'PORCH_DOOR_PASSWORD')
 
 _SECRET_RE = re.compile(r'^[0-9a-f]{64}$')

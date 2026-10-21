@@ -395,7 +395,7 @@ class ChatHandler(BaseHTTPRequestHandler):
     # Generous, because a streamed answer legitimately takes minutes.
     timeout = 300
     # Don't advertise the Python version to anonymous callers.
-    server_version = 'cush-tools'
+    server_version = 'porch'
     sys_version = ''
 
     name = 'chat'

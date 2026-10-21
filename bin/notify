@@ -6,7 +6,8 @@
 
 TUNNEL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-CONFIG_FILE="$HOME/.config/cush-tools/notify.conf"
+. "$TUNNEL_DIR/lib/porch-user-config.sh"
+CONFIG_FILE="$(porch_user_config_file notify.conf)"
 
 # Help
 if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
@@ -35,7 +36,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
   echo "No ntfy topic configured. To set up:"
   echo "  1. Install ntfy app on your phone (https://ntfy.sh)"
   echo "  2. Subscribe to a topic name of your choice"
-  echo "  3. Run: mkdir -p ~/.config/cush-tools && echo 'NTFY_TOPIC=your-topic' > ~/.config/cush-tools/notify.conf"
+  echo "  3. Run: mkdir -p ~/.config/porch && echo 'NTFY_TOPIC=your-topic' > ~/.config/porch/notify.conf"
   exit 1
 fi
 

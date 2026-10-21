@@ -37,7 +37,15 @@ from typing import Optional
 
 
 INFISICAL_INSTALL_URL = "https://infisical.com/docs/cli/overview"
-INFISICAL_ENV_FILE = os.path.expanduser("~/.config/cush-tools/infisical.env")
+try:
+    from porch_paths import env_first as _env_first, user_config_file as _user_config_file
+except ImportError:  # loaded from outside lib/
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from porch_paths import env_first as _env_first, user_config_file as _user_config_file
+# ~/.config/porch/infisical.env (the pre-rename ~/.config/cush-tools/ one when
+# only that exists); PORCH_INFISICAL_ENV_FILE / CUSH_INFISICAL_ENV_FILE win.
+INFISICAL_ENV_FILE = _env_first("PORCH_INFISICAL_ENV_FILE", "CUSH_INFISICAL_ENV_FILE",
+                                default=_user_config_file("infisical.env"))
 INFISICAL_DEFAULT_DOMAIN = "https://app.infisical.com/api"
 
 
@@ -116,7 +124,7 @@ _env_loaded = False
 
 
 def _load_env_file() -> None:
-    """Source ~/.config/cush-tools/infisical.env into os.environ.
+    """Source INFISICAL_ENV_FILE (~/.config/porch/infisical.env) into os.environ.
 
     Idempotent — only reads the file once per process. Uses a minimal parser
     that handles `export KEY=VALUE` and `KEY=VALUE` lines, stripping single

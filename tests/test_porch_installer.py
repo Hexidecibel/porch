@@ -61,7 +61,7 @@ class PinTest(unittest.TestCase):
     def test_install_sh_pins_match_relay(self):
         t = read(INSTALL_SH)
         self.assertIn(f"FRP_PINNED_VERSION={common.FRP_VERSION}\n", t)
-        self.assertIn(f'CUSH_FRP_VERSION="${{CUSH_FRP_VERSION:-{common.FRP_VERSION}}}"', t)
+        self.assertIn(f'PORCH_FRP_VERSION="${{PORCH_FRP_VERSION:-${{CUSH_FRP_VERSION:-{common.FRP_VERSION}}}}}"', t)
         self.assertIn(f"FRP_SHA256_LINUX_AMD64={common.FRP_SHA256['amd64']}\n", t)
         self.assertIn(f"FRP_SHA256_LINUX_ARM64={common.FRP_SHA256['arm64']}\n", t)
         for v in ("DARWIN_AMD64", "DARWIN_ARM64"):
@@ -400,6 +400,48 @@ class ClientInstallFailureTest(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIn("does not match its published sha256", p.stderr)
         self.assertTrue(os.path.exists(marker), "the old install was removed before verifying")
+
+    def which_dir(self, env_extra):
+        """The install dir the script settles on, read from its "already
+        exists" refusal (no PORCH_FORCE, so nothing is downloaded)."""
+        p = self.run_install(env_extra)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        out = p.stdout + p.stderr
+        self.assertIn("already exists", out)
+        return out
+
+    def test_default_dir_is_porch(self):
+        os.makedirs(os.path.join(self.home, "porch"))
+        os.makedirs(os.path.join(self.home, "cush-tools"))
+        out = self.which_dir({"PORCH_REPO_TARBALL": "file://" + self.tarball})
+        self.assertIn(os.path.join(self.home, "porch") + " already exists", out)
+
+    def test_existing_cush_tools_dir_is_kept(self):
+        # a machine paired before the rename: upgrade ~/cush-tools in place
+        os.makedirs(os.path.join(self.home, "cush-tools"))
+        out = self.which_dir({"PORCH_REPO_TARBALL": "file://" + self.tarball})
+        self.assertIn(os.path.join(self.home, "cush-tools") + " already exists", out)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "porch")))
+
+    def test_porch_names_win_over_cush_names(self):
+        a, b = os.path.join(self.home, "a"), os.path.join(self.home, "b")
+        os.makedirs(a)
+        os.makedirs(b)
+        out = self.which_dir({"PORCH_DIR": a, "CUSH_DIR": b,
+                              "PORCH_REPO_TARBALL": "file://" + self.tarball})
+        self.assertIn(a + " already exists", out)
+        out = self.which_dir({"CUSH_DIR": b, "CUSH_REPO_TARBALL": "file://" + self.tarball})
+        self.assertIn(b + " already exists", out)
+
+    def test_porch_force_replaces_only_after_verifying(self):
+        dest = os.path.join(self.home, "porch")
+        os.makedirs(dest)
+        p = self.run_install({"PORCH_DIR": dest, "PORCH_FORCE": "1",
+                              "PORCH_AUTH_URL": "https://tunnel.example.invalid",
+                              "PORCH_REPO_TARBALL": "file://" + self.tarball})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("does not match its published sha256", p.stderr)
+        self.assertTrue(os.path.isdir(dest))
 
     def test_template_copy_refuses_to_run(self):
         # the raw repo copy has no server: it says so before downloading anything

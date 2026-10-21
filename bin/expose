@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cush-tools: expose a local port as a permanent subdomain on *.cush.rocks
+# Porch: expose a local port as a permanent subdomain on *.cush.rocks
 #
 # Usage: expose <subdomain> <port> [--expo <project-path>]
 #
@@ -11,7 +11,7 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-cush-tools expose — create a permanent *.cush.rocks subdomain for a local service
+porch expose — create a permanent *.cush.rocks subdomain for a local service
 
 Usage:
   expose <subdomain> <port> [--expo <project-path>]

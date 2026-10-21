@@ -1,5 +1,5 @@
 #!/bin/bash
-# Clean up leftover temp files and logs from expired/closed cush-tools
+# Clean up leftover temp files and logs from expired/closed Porch
 # Usage: bin/cleanup [--all] [--drops [days]] [--dry-run]
 
 # No `-e`: several counters here deliberately run commands that return

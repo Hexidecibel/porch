@@ -65,48 +65,48 @@ class PublishTarballTest(unittest.TestCase):
         return r, out
 
     def test_checkout_directory_name_does_not_matter(self):
-        # A worktree or renamed clone: the tarball still unpacks to cush-tools/.
+        # A worktree or renamed clone: the tarball still unpacks to porch/.
         other = os.path.join(self.tmp, "porch-wt-123")
         shutil.copytree(self.repo, other, symlinks=True)
         r, out = self._build(other)
         self.assertEqual(r.returncode, 0, r.stderr)
         with tarfile.open(out) as t:
             names = set(t.getnames())
-        self.assertIn("cush-tools/bin/tunnel", names)
-        self.assertIn("cush-tools/data/links.json", names)
+        self.assertIn("porch/bin/tunnel", names)
+        self.assertIn("porch/data/links.json", names)
         self.assertFalse(any("porch-wt-123" in n for n in names))
-        self.assertTrue(all(n.startswith("cush-tools/") for n in names), names)
+        self.assertTrue(all(n.startswith("porch/") for n in names), names)
         for n in names:
             self.assertNotIn("SECRET", n)
-        self.assertNotIn("cush-tools/data/devices.json.bak-x", names)
+        self.assertNotIn("porch/data/devices.json.bak-x", names)
 
     def test_planted_secrets_do_not_ship(self):
         r, out = self._build()
         self.assertEqual(r.returncode, 0, r.stderr)
         with tarfile.open(out) as t:
             names = set(t.getnames())
-        self.assertIn("cush-tools/data/links.json", names)
-        self.assertIn("cush-tools/bin/tunnel", names)
-        self.assertIn("cush-tools/docs/public.md", names)
-        self.assertIn("cush-tools/share/public-exclude.txt", names)
+        self.assertIn("porch/data/links.json", names)
+        self.assertIn("porch/bin/tunnel", names)
+        self.assertIn("porch/docs/public.md", names)
+        self.assertIn("porch/share/public-exclude.txt", names)
         for n in names:
             self.assertNotIn("SECRET", n)
-            if n.startswith("cush-tools/data/"):
-                self.assertEqual(n, "cush-tools/data/links.json")
+            if n.startswith("porch/data/"):
+                self.assertEqual(n, "porch/data/links.json")
         for bad in ("data/devices.json.bak-x", "data/.admin-cli-token",
                     "data/history.jsonl", "config/frpc.toml", "logs/x.log",
                     "bin/frpc", ".claude/settings.json", "share/public-export-markers.txt"):
-            self.assertNotIn("cush-tools/" + bad, names)
+            self.assertNotIn("porch/" + bad, names)
 
     def test_public_exclude_list_never_ships(self):
         r, out = self._build()
         self.assertEqual(r.returncode, 0, r.stderr)
         with tarfile.open(out) as t:
             names = set(t.getnames())
-            man = t.extractfile("cush-tools/share/porch-files.txt").read().decode().split()
+            man = t.extractfile("porch/share/porch-files.txt").read().decode().split()
         for bad in ("CLAUDE.md", "todo.md", ".claude/commands/x.md", "docs/private-plan.md",
                     "share/public-export-markers.txt"):
-            self.assertNotIn("cush-tools/" + bad, names)
+            self.assertNotIn("porch/" + bad, names)
             self.assertNotIn(bad, man)
         # and an install repacking from the manifest drops them too, even if present
         inst = self._unpack(out, os.path.join(self.tmp, "fresh"))
@@ -116,7 +116,7 @@ class PublishTarballTest(unittest.TestCase):
                             capture_output=True, text=True)
         self.assertEqual(r2.returncode, 0, r2.stderr)
         with tarfile.open(out2) as t:
-            self.assertNotIn("cush-tools/CLAUDE.md", t.getnames())
+            self.assertNotIn("porch/CLAUDE.md", t.getnames())
 
     def test_prefix_and_sha256_name(self):
         out = os.path.join(self.tmp, "porch.tar.gz")
@@ -155,7 +155,7 @@ class PublishTarballTest(unittest.TestCase):
         os.makedirs(where)
         with tarfile.open(tgz) as t:
             t.extractall(where, filter="data")
-        return os.path.join(where, "cush-tools")
+        return os.path.join(where, "porch")
 
     def test_git_tarball_ships_a_manifest(self):
         r, out = self._build()
@@ -163,9 +163,9 @@ class PublishTarballTest(unittest.TestCase):
         self.assertIn("(git)", r.stdout)
         with tarfile.open(out) as t:
             names = set(t.getnames())
-            man = t.extractfile("cush-tools/share/porch-files.txt").read().decode().split()
-        self.assertIn("cush-tools/share/porch-files.txt", names)
-        self.assertEqual(sorted("cush-tools/" + m for m in man), sorted(names))
+            man = t.extractfile("porch/share/porch-files.txt").read().decode().split()
+        self.assertIn("porch/share/porch-files.txt", names)
+        self.assertEqual(sorted("porch/" + m for m in man), sorted(names))
         self.assertNotIn("data/devices.json", man)
 
     def test_install_without_git_repacks_from_the_manifest(self):
@@ -229,8 +229,8 @@ class PublishTarballTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         with tarfile.open(out) as t:
             names = set(t.getnames())
-        self.assertNotIn("cush-tools/config/frps.toml", names)
-        self.assertNotIn("cush-tools/bin/frpc", names)
+        self.assertNotIn("porch/config/frps.toml", names)
+        self.assertNotIn("porch/bin/frpc", names)
 
     def test_no_git_and_no_manifest_fails(self):
         inst = os.path.join(self.tmp, "bare", "cush-tools")
@@ -239,6 +239,29 @@ class PublishTarballTest(unittest.TestCase):
                             os.path.join(self.tmp, "x.tgz")], capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("porch-files.txt", r.stderr)
+
+    def test_publish_writes_porch_and_the_old_name(self):
+        # porch.tar.gz for new installers, cush-tools.tar.gz (same bytes) for
+        # installers rendered before the rename; each .sha256 names its file
+        web = os.path.join(self.tmp, "web")
+        os.makedirs(web)
+        r = subprocess.run([os.path.join(self.repo, "bin", "publish-tarball")],
+                           capture_output=True, text=True,
+                           env=dict(os.environ, PORCH_WEB_ROOT=web))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(os.listdir(web)), ["cush-tools.tar.gz", "cush-tools.tar.gz.sha256",
+                                                   "porch.tar.gz", "porch.tar.gz.sha256"])
+        with open(os.path.join(web, "porch.tar.gz"), "rb") as a, \
+                open(os.path.join(web, "cush-tools.tar.gz"), "rb") as b:
+            data = a.read()
+            self.assertEqual(data, b.read())
+        import hashlib
+        hexd = hashlib.sha256(data).hexdigest()
+        for name in ("porch.tar.gz", "cush-tools.tar.gz"):
+            with open(os.path.join(web, name + ".sha256")) as f:
+                self.assertEqual(f.read(), f"{hexd}  {name}\n")
+        with tarfile.open(os.path.join(web, "porch.tar.gz")) as t:
+            self.assertTrue(all(n.startswith("porch/") for n in t.getnames()))
 
     def test_manifest_for_a_ref_matches_git_archive(self):
         _git(self.repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "x")

@@ -64,8 +64,8 @@ LAUNCH_EXPIRES = ('30m', '1h', '24h', '7d', 'never')
 # Never handed to a launcher: they would make it skip daemonizing, reuse a
 # parent's door spec or log file, or carry a password it did not ask for.
 LAUNCHER_ENV_DROP = tuple(dict.fromkeys(door_recipe.ENV_DROP + (
-    '_CUSH_DAEMONIZED', 'CUSH_LOG_FILE', '_PORCH_DOOR_SPEC', 'TUNNEL_NO_STATE',
-    'PORCH_DOOR_PASSWORD')))
+    '_CUSH_DAEMONIZED', 'PORCH_LOG_FILE', 'CUSH_LOG_FILE', '_PORCH_DOOR_SPEC',
+    'TUNNEL_NO_STATE', 'PORCH_DOOR_PASSWORD')))
 
 # set_rules: a key left at KEEP is not touched.
 KEEP = object()
@@ -808,11 +808,16 @@ def is_our_tunnel(pid, name, proc='/proc'):
             and name in argv)
 
 
+def history_path():
+    """data/history.jsonl, or PORCH_HISTORY_FILE (old name CUSH_HISTORY_FILE)."""
+    return (os.environ.get('PORCH_HISTORY_FILE') or os.environ.get('CUSH_HISTORY_FILE')
+            or os.path.join(str(REPO_ROOT), 'data', 'history.jsonl'))
+
+
 def relaunch_command(name, extra_flags, history=None):
     """The shell command that relaunches door `name` with extra flags, from
     the newest start line of data/history.jsonl (argv + cwd); None if absent."""
-    history = history or os.environ.get('CUSH_HISTORY_FILE') or os.path.join(
-        str(REPO_ROOT), 'data', 'history.jsonl')
+    history = history or history_path()
     entry = None
     try:
         with open(history, 'rb') as f:

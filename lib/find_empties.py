@@ -4,7 +4,7 @@
 Walks one or more `.cush-secrets` manifests, runs `op read` for each
 `op://...` ref, and classifies each field as OK / EMPTY / MISSING / ERROR.
 
-Useful for diagnosing migration failures (e.g. `bin/cush-migrate-backend`
+Useful for diagnosing migration failures (e.g. `bin/porch-migrate-backend`
 exiting with rc=5 because Infisical refused to accept an empty value
 returned by `op read`). Highlights the exact fields the user needs to
 populate in 1Password before re-running migration.
@@ -18,7 +18,7 @@ Public functions:
   scan_manifest(manifest_path)   -> list[dict]   (rows for that project)
   scan_root(root)                -> list[dict]   (rows across all projects)
 
-CLI entry point lives in `bin/cush-find-empties`.
+CLI entry point lives in `bin/porch-find-empties`.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
-# Make sibling lib modules importable when loaded by `bin/cush-find-empties`.
+# Make sibling lib modules importable when loaded by `bin/porch-find-empties`.
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
@@ -217,7 +217,7 @@ def _summary_counts(rows: list[dict]) -> dict:
 
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="cush-find-empties",
+        prog="porch-find-empties",
         description=(
             "Scan `.cush-secrets` manifests and report which `op://` refs "
             "resolve to empty / missing / errored values in 1Password. "
@@ -261,7 +261,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # are given, --all wins (with a heads-up).
     if args.all and args.project_dir:
         print(
-            "[cush-find-empties] --all overrides PROJECT_DIR; ignoring "
+            "[porch-find-empties] --all overrides PROJECT_DIR; ignoring "
             f"{args.project_dir!r}",
             file=sys.stderr,
         )
@@ -269,10 +269,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Auth probe up front: one cheap call instead of N silent failures.
     if op_whoami() is None:
         print(
-            "[cush-find-empties] 1Password CLI is not authenticated.\n"
+            "[porch-find-empties] 1Password CLI is not authenticated.\n"
             "  Mode 1 (service account): export OP_SERVICE_ACCOUNT_TOKEN.\n"
             "  Mode 2 (stored creds):    eval \"$(op signin)\" or refresh\n"
-            "                            ~/.config/cush-tools/op.env then\n"
+            "                            ~/.config/porch/op.env then\n"
             "                            re-source it.\n"
             "See: https://developer.1password.com/docs/cli/get-started/",
             file=sys.stderr,
@@ -288,7 +288,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             bad = [r for r in roots if not r.exists()]
             if bad:
                 for r in bad:
-                    print(f"[cush-find-empties] root does not exist: {r}",
+                    print(f"[porch-find-empties] root does not exist: {r}",
                           file=sys.stderr)
                 return 2
             for r in roots:
@@ -296,7 +296,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             project_dir = Path(args.project_dir or os.getcwd()).expanduser().resolve()
             if not project_dir.is_dir():
-                print(f"[cush-find-empties] not a directory: {project_dir}",
+                print(f"[porch-find-empties] not a directory: {project_dir}",
                       file=sys.stderr)
                 return 2
             mp = _resolve_manifest_for_dir(project_dir)
@@ -306,14 +306,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 mp = manifest_mod.find_manifest(project_dir)
             if mp is None:
                 print(
-                    f"[cush-find-empties] no .cush-secrets found at or above "
+                    f"[porch-find-empties] no .cush-secrets found at or above "
                     f"{project_dir}",
                     file=sys.stderr,
                 )
                 return 2
             rows.extend(scan_manifest(mp))
     except OpAuthError as e:
-        print(f"[cush-find-empties] op auth lost mid-scan: {e}",
+        print(f"[porch-find-empties] op auth lost mid-scan: {e}",
               file=sys.stderr)
         return 3
 
@@ -324,13 +324,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         if not display_rows:
             mode = "across all scanned projects" if args.all else "in this project"
-            print(f"[cush-find-empties] no problems found {mode}.")
+            print(f"[porch-find-empties] no problems found {mode}.")
         else:
             sys.stdout.write(render_table(display_rows))
 
     counts = _summary_counts(rows)
     # Non-zero exit if anything actionable surfaced — lets callers chain
-    # `bin/cush-find-empties && ...` for "everything's fine, proceed".
+    # `bin/porch-find-empties && ...` for "everything's fine, proceed".
     if any(counts[s] for s in PROBLEM_STATUSES):
         return 1
     return 0

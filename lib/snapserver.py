@@ -134,7 +134,7 @@ class SnapHandler(BaseHTTPRequestHandler):
     # Bound how long a half-open or slow-loris connection can hold a thread.
     timeout = 120
     # Don't advertise the Python version to anonymous callers.
-    server_version = 'cush-tools'
+    server_version = 'porch'
     sys_version = ''
 
     snap_html = ""

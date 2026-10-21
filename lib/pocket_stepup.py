@@ -1,5 +1,5 @@
 """Pocket step-up: "confirm it's you" before a privileged action, with a
-passkey (WebAuthn, lib/porch_webauthn.py) or the cush-auth admin password.
+passkey (WebAuthn, lib/porch_webauthn.py) or the porch-auth admin password.
 
     PasskeyStore     ~/pocket/<name>/.passkeys.json (0600, atomic, locked)
     ChallengeStore   WebAuthn challenges in memory: single use, 120s, bound
@@ -518,27 +518,27 @@ class StepUpMixin:
         self._grant('password')
 
     def _verify_admin_password(self, pw):
-        """True / False, or None after sending the error (cush-auth down,
+        """True / False, or None after sending the error (porch-auth down,
         too old, or its own limiter)."""
         if self.auth is None:
-            self._api_error(503, "cush-auth isn't configured for this pocket", 'auth_down')
+            self._api_error(503, "porch-auth isn't configured for this pocket", 'auth_down')
             return None
         try:
             return self.auth.verify_password(pw, client_ip(self))
         except auth_client.AuthDown:
-            self._api_error(503, "cush-auth isn't answering", 'auth_down')
+            self._api_error(503, "porch-auth isn't answering", 'auth_down')
         except auth_client.TokenError:
-            self._api_error(503, "cush-auth's CLI token is unreadable", 'auth_down')
+            self._api_error(503, "porch-auth's CLI token is unreadable", 'auth_down')
         except auth_client.AuthError as e:
             if e.status == 404:
-                self._api_error(501, 'update cush-auth (bin/auth-deploy)', 'auth_old')
+                self._api_error(501, 'update porch-auth (bin/auth-deploy)', 'auth_old')
             elif e.status == 429:
                 self._api_error(429, 'Too many password attempts; wait a minute',
                                 'rate_limited', retry_after=60, headers={'Retry-After': '60'})
             elif e.status == 503:
-                self._api_error(503, 'cush-auth is busy; try again', 'auth_busy')
+                self._api_error(503, 'porch-auth is busy; try again', 'auth_busy')
             else:
-                self._api_error(502, 'cush-auth refused the check', 'auth_error')
+                self._api_error(502, 'porch-auth refused the check', 'auth_error')
         return None
 
     def api_stepup_end(self, data):

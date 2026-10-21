@@ -26,9 +26,9 @@
 #   PORCH_TARBALL         code tarball URL (default: the latest GitHub release,
 #                         https://github.com/Hexidecibel/porch/releases/latest/download/porch.tar.gz;
 #                         a Porch landing page's copy of this script defaults to that
-#                         box's own /cush-tools.tar.gz; file:// works). Its sha256 is
+#                         box's own /porch.tar.gz; file:// works). Its sha256 is
 #                         read from "$PORCH_TARBALL.sha256". The tarball holds one
-#                         top-level directory (porch/ or cush-tools/) with bin/porch.
+#                         top-level directory (porch/; cush-tools/ in older ones) with bin/porch.
 #   PORCH_TARBALL_SHA256  expected sha256 of the tarball (skips the .sha256 download)
 #   PORCH_USER            service account (default: porch)
 #   PORCH_DIR             same as --dir
@@ -544,7 +544,7 @@ install_code() {
     run mkdir -p "$TMP/x"
     run tar -xzf "$TMP/porch.tar.gz" -C "$TMP/x" --no-same-owner
     # One top-level directory holding bin/porch, whatever it is called: the
-    # GitHub release unpacks to porch/, a landing page's tarball to cush-tools/.
+    # porch/ now, cush-tools/ in a landing page's tarball from before the rename.
     if [ "$DRY" = 1 ]; then
         SRC="$TMP/x/porch"
     else

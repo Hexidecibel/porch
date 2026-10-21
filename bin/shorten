@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Manage short links for the cush-shortener service
+# Manage short links for the shortener service (the porch-shortener user
+# unit, or cush-shortener, its pre-rename system unit on older installs)
 # Usage: bin/shorten add <slug> <url>
 #        bin/shorten rm <slug>
 #        bin/shorten list
@@ -28,7 +29,10 @@ usage() {
 
 signal_server() {
   local pid pids
-  pid=$(systemctl show cush-shortener --property=MainPID --value 2>/dev/null || true)
+  pid=$(systemctl --user show porch-shortener --property=MainPID --value 2>/dev/null || true)
+  if [ -z "$pid" ] || [ "$pid" = "0" ]; then
+    pid=$(systemctl show cush-shortener --property=MainPID --value 2>/dev/null || true)
+  fi
   if [ -z "$pid" ] || [ "$pid" = "0" ]; then
     # `pgrep -f shortenerserver.py` also matches any shell that mentions the
     # script, and returns several PIDs on one line when it does — which then

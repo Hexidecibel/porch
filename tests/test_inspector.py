@@ -706,7 +706,7 @@ echo "args=$(door_proxy_args "$TUNNEL_STATE_DIR/flagtest.json" | tr '\n' ' ')"
         d = tempfile.mkdtemp()
         self.addCleanup(lambda: subprocess.run(['rm', '-rf', d]))
         e = {k: v for k, v in os.environ.items() if not k.startswith('PORCH_DOOR')}
-        e['CUSH_HISTORY_FILE'] = os.path.join(d, 'history.jsonl')
+        e['PORCH_HISTORY_FILE'] = os.path.join(d, 'history.jsonl')
         p = subprocess.run(['bash', '-c', self.SCRIPT, 'x', _LIB, d, *args],
                            capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL,
                            timeout=30)

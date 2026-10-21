@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Thin wrapper around the 1Password `op` CLI.
 
-Centralizes the error matrix for cush-tools' op integrations:
+Centralizes the error matrix for Porch's op integrations:
 
   - `op` not on PATH                  -> OpAuthError (with install link)
   - OP_SERVICE_ACCOUNT_TOKEN missing  -> OpAuthError (with setup hint)
@@ -129,8 +129,8 @@ def _ensure_op_available() -> None:
                 "auto-resignin attempted).\n"
                 "Configure auth with one of:\n"
                 f"  - OP_SERVICE_ACCOUNT_TOKEN env var ({OP_SERVICE_ACCOUNTS_URL})\n"
-                "  - Stored credentials in ~/.config/cush-tools/op.env (Mode 2)\n"
-                "Run any cush-tools op-aware command with -h "
+                "  - Stored credentials in ~/.config/porch/op.env (Mode 2)\n"
+                "Run any Porch op-aware command with -h "
                 "(e.g. `bin/secure-entry --save-to-op ... -h`) to see the full "
                 "setup hint."
             )

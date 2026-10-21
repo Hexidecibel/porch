@@ -11,7 +11,7 @@ Naming note: this module is `cush_secrets` rather than the more obvious
 (`secrets.token_bytes(...)` etc.) that `lib/authserver.py` depends on. With
 `lib/` on sys.path, a local `lib/secrets.py` would shadow the stdlib and
 break authserver. The `cush_secrets` rename preserves the stdlib import
-chain while still providing a single dispatch entrypoint for cush-tools'
+chain while still providing a single dispatch entrypoint for Porch's
 secret backends.
 
 Public API:
@@ -178,7 +178,7 @@ def inject_template(template: str) -> str:
     `op` invocation handles all refs). For mixed or inf-containing templates,
     falls back to per-ref reads with a regex substitute — this is O(N) calls
     but only on templates that mention any inf:// ref, and N is typically
-    small for cush-tools manifests.
+    small for Porch manifests.
     """
     if not template:
         return template

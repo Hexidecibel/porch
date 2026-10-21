@@ -34,7 +34,7 @@ MAX_LINK_OPENS = 1000
 _LINK_NAME = re.compile(r'^pk-[a-z0-9](?:[a-z0-9-]{0,36}[a-z0-9])?$')
 # Never handed to a launcher: they would make it think it is already a
 # daemon (it would then run in the foreground), or carry another door's spec.
-LAUNCHER_ENV_DROP = ('_CUSH_DAEMONIZED', 'CUSH_LOG_FILE', '_PORCH_DOOR_SPEC',
+LAUNCHER_ENV_DROP = ('_CUSH_DAEMONIZED', 'PORCH_LOG_FILE', 'CUSH_LOG_FILE', '_PORCH_DOOR_SPEC',
                      'TUNNEL_NO_STATE', 'PORCH_DOOR_PASSWORD')
 
 

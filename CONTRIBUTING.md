@@ -4,6 +4,20 @@ Thanks for helping. Porch is a small, self-hosted stack: frp for the tunnels,
 HAProxy in front, and a set of stdlib Python servers behind it. This page says
 how to run the tests, what the code expects of a change, and where things live.
 
+## Pull requests and security reports
+
+- Send pull requests to the public repo,
+  [Hexidecibel/porch](https://github.com/Hexidecibel/porch), against `main`.
+  CI (`.github/workflows/test.yml`) runs `bin/test` on Ubuntu 24.04 for every
+  push and pull request.
+- The maintainer develops in a private repo that the public one is exported
+  from, file for file. A merged pull request is brought back there with
+  `bin/public-pull` (your commits are applied as patches and keep your name as
+  author) before the next release; releases only ever add commits on top of
+  public `main`, so nothing merged on GitHub is lost.
+- Found a vulnerability? Don't open an issue: report it privately as
+  [SECURITY.md](SECURITY.md) describes.
+
 ## Running the tests
 
 ```bash
@@ -105,22 +119,34 @@ rolls back and deletes everything tagged `porch-e2e` (`--keep` leaves it up;
 
 ## Cutting a release
 
-Releases are GitHub releases of `Hexidecibel/porch`. The public repo is
-generated, not edited: `bin/release` exports the private tree's HEAD with
-`bin/public-export` (exclude list + leak scan), builds `porch.tar.gz` and
-`porch.tar.gz.sha256` from that export, replaces the public `main` with the
-export's single commit (a force-push) and uploads the two files with
-`gh release create`. `site/porch.sh` installs
-`releases/latest/download/porch.tar.gz`, so a new release is live for new
-installs at once.
+Releases are GitHub releases of `Hexidecibel/porch`. The public tree is
+generated from the maintainer's private repo, and its history only grows:
+`bin/release` exports the private HEAD with `bin/public-export` (exclude list
++ leak scan), lays it over a fresh clone of public `main`, and adds ONE normal
+commit "Porch vX.Y.Z" listing the private commit subjects since the last
+release (private paths and personal markers filtered out). It tags it, pushes
+`main` and the tag together (`git push --atomic`, never `--force`), records
+the release in the private `share/public-release.json`, builds `porch.tar.gz`
++ `.sha256` from the export and uploads them with `gh release create`.
+`site/porch.sh` installs `releases/latest/download/porch.tar.gz`, so a new
+release is live for new installs at once.
+
+If public `main` has commits the private repo lacks (a merged pull request),
+`bin/release` refuses until you run `bin/public-pull`, which applies them as
+patches (`git format-patch` + `git am --3way`, authorship kept) and records
+the sync. On a conflict it stops mid-`git am`: fix the files, `git add` them,
+`bin/public-pull --continue` (or `--abort`).
 
 ```bash
 git status                       # commit first: only HEAD is released
-bin/release --dry-run            # export + tarball locally, print the git/gh commands
-bin/release --yes                # v0.1.0, then patch bumps; or --version v0.2.0
+bin/public-pull --dry-run        # anything merged on GitHub since the last release?
+bin/public-pull                  # bring it in (then run the tests)
+bin/release --dry-run            # diff stat, commit message, the git/gh commands
+bin/release --yes                # patch bump (or --version v0.2.0)
 ```
 
-Needs `gh auth login` with push rights. Check the tarball with
+No change since the last release means no release. Needs `gh auth login` with
+push rights. Check the tarball with
 `tar -tzf ~/.local/share/porch/release/<version>/porch.tar.gz` and try it on a
 throwaway VM with `PORCH_TARBALL=file:///path/porch.tar.gz sudo -E sh site/porch.sh`.
 
@@ -137,7 +163,7 @@ bin/            launchers and operator scripts
   status, start-server, stop-server      run and inspect the stack
   auth-admin, bootstrap                  devices, pairing, invites
   deploy, publish-tarball                landing page, installers, tarball
-  public-export, release                 the public repo and GitHub releases
+  public-export, release, public-pull    the public repo and GitHub releases
   haproxy-apply, haproxy-porch           validated HAProxy installs
   inject, stash, cush-init, cush-audit   secrets tooling
   test                                   the test suite

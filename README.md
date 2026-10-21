@@ -1,27 +1,43 @@
 <p align="center">
-  <img src="docs/assets/hero.svg" alt="Porch: leave the light on. Anything on your machine, one command from a real HTTPS link on your own domain." width="100%">
+  <img src="docs/assets/hero.svg" alt="Porch: leave the light on. Share files, collect photos, take secrets and let people in. Your box, your domain." width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Hexidecibel/porch/actions/workflows/test.yml"><img src="https://github.com/Hexidecibel/porch/actions/workflows/test.yml/badge.svg" alt="tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-F5A524" alt="MIT license"></a>
 </p>
 
 <p align="center">
   <a href="#install-in-60-seconds"><b>Install</b></a> &nbsp;·&nbsp;
   <a href="https://hexidecibel.github.io/porch/showcase/">Showcase</a> &nbsp;·&nbsp;
+  <a href="docs/compare.md">Compare</a> &nbsp;·&nbsp;
   <a href="docs/guides/README.md">Guides</a> &nbsp;·&nbsp;
   <a href="docs/features.md">Features</a> &nbsp;·&nbsp;
   <a href="docs/tools.md">Tools</a> &nbsp;·&nbsp;
   <a href="docs/security.md">Security</a>
 </p>
 
-<p align="center"><a href="https://hexidecibel.github.io/porch/showcase/"><b>▶ See every app in the showcase</b></a></p>
+**Porch is a self-hosted front porch for your server: small, ready-made web
+pages for sending things, receiving things and letting people in, each on its
+own link on your domain, each closing when you say so.**
 
----
+- **Send a huge video with a link that dies after one download.** `porch share --e2e --burn video.mp4`: sealed before it leaves, so your own box only ever holds ciphertext.
+- **Collect the wedding photos from every guest into one album.** `porch media wedding --bg`: guests open a link and add photos and videos, no accounts; only you can delete.
+- **Show a client your dev server on a real HTTPS URL.** `porch tunnel 3000 demo --bg` gives `https://demo.tunnel.porch.example.com`, real certificate, gone in an hour.
+- **Get an API key from someone without it touching chat or email.** `porch secure-entry stripe --bg`: a one-time form that saves straight to a 0600 file, Infisical or 1Password.
+- **Answer "can I come in?" from your phone.** A visitor at a closed door or a private app taps *Ask*; the [Porch app](docs/pocket-app.md) notifies you, and a closed door reopens with *Allow 1h* right on the lock screen.
 
-**Porch turns anything on your machine into a real HTTPS link on your own
-domain, in one command, from your own box.** No account, no database, no
-containers, no telemetry.
+All on your own domain. No account, no cloud, one box.
+
+<p align="center"><a href="https://hexidecibel.github.io/porch/showcase/"><b>▶ See all 21 apps and pages in the showcase</b></a>, on a phone and a desktop.</p>
 
 <p align="center">
-  <img src="docs/assets/terminal.svg" alt="porch tunnel, drop, media and secure-entry each print a live HTTPS link; porch status lists them" width="100%">
+  <img src="docs/assets/demo.svg" alt="A 20-second demo: porch share --e2e seals a photo and prints a link on your domain; a friend opens it and it decrypts in their browser; an hour later the door has closed and they ask to reopen; you tap Allow 1h on your lock screen and their page comes back." width="100%">
 </p>
+
+**Who it's for:** self-hosters and homelabbers with a domain and a box: a
+machine at home (plus a $4-5 relay if your router can't forward ports) or a
+$6 VPS.
 
 ## What you get
 
@@ -43,8 +59,28 @@ containers, no telemetry.
 </tr>
 </table>
 
+<p align="center">
+  <img src="docs/assets/terminal.svg" alt="porch tunnel, drop, media and secure-entry each print a live HTTPS link; porch status lists them" width="100%">
+</p>
+
 Built on the Python standard library, [frp](https://github.com/fatedier/frp),
-HAProxy and certbot. The full tour: **[docs/features.md](docs/features.md)**.
+HAProxy and certbot. No database, no containers, no telemetry. The full tour:
+**[docs/features.md](docs/features.md)**.
+
+## Porch vs. the usual suspects
+
+Porch is not a hosted tunnel service. It is the apps around a tunnel, on
+hardware and a domain you already have.
+
+| | Porch | ngrok | Cloudflare Tunnel | Tailscale Funnel |
+|---|---|---|---|---|
+| Your own domain | yes | paid plans | yes, on Cloudflare DNS | no (`ts.net` names) |
+| Built-in pages to send and receive (uploads, albums, secrets, E2E shares) | yes | — | — | — |
+| Link rules | expiry, password, guest link, burn | auth and IP rules | Cloudflare Access login | — |
+| Needs your own server and a domain | **yes** | no | a domain | no |
+| Maturity | **new** | established | established | beta |
+
+The full table (accounts, TLS, open source, price, and frp): **[docs/compare.md](docs/compare.md)**.
 
 ## Install in 60 seconds
 
@@ -103,6 +139,7 @@ holds your key. Prices, transfer limits and what has been tested:
 
 ## Learn more
 
+- **[Porch compared](docs/compare.md)** with ngrok, Cloudflare Tunnel, Tailscale Funnel and frp
 - **[Setup guides](docs/guides/README.md)**: one per path, with costs, verification and undo
 - **[Features](docs/features.md)**: doors, rules, sharing, E2E, the Porch app, inspector, secrets, MCP
 - **[Tools reference](docs/tools.md)**: every command, flag and limit

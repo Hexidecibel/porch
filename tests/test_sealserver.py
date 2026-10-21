@@ -35,6 +35,7 @@ import sealserver as ss  # noqa: E402
 from porch_http import make_server  # noqa: E402
 
 NODE = shutil.which("node")
+NEEDS_CRYPTO = unittest.skipUnless(ps.available(), "python3-cryptography is not installed")
 BIN_SEAL = os.path.join(LIB, "..", "bin", "seal")
 NAME = "sealtest"
 HOST = f"{NAME}.tunnel.cush.rocks"
@@ -50,6 +51,7 @@ class Closer:
         self.event.set()
 
 
+@NEEDS_CRYPTO
 class SealCase(unittest.TestCase):
     rules = {}
     size = 300000
@@ -372,6 +374,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("not a sealed file", r.stderr)
 
+    @NEEDS_CRYPTO
     def test_owned_file_rules(self):
         sealed = os.path.join(self.tmp, "x.pseal")
         ps.seal_file(io.BytesIO(b"hi"), sealed, "x", "text/plain")

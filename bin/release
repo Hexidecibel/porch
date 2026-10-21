@@ -2,34 +2,47 @@
 """bin/release: cut a public Porch release on GitHub.
 
 Usage: bin/release [--version vX.Y.Z] [--dry-run] [--yes] [--repo OWNER/NAME]
-                   [--notes TEXT | --notes-file F] [--dist DIR]
+                   [--notes TEXT | --notes-file F] [--dist DIR] [--remote URL]
                    [--author-name N] [--author-email E]
 
-  1. bin/public-export into a temp dir (HEAD only, exclude list, leak scan);
-  2. builds porch.tar.gz + porch.tar.gz.sha256 FROM THAT EXPORT (its own
-     bin/publish-tarball --prefix porch), so the tarball holds exactly the
-     public files, under one top-level porch/ directory;
-  3. force-pushes the export's single commit to the GitHub repo's main (the
-     public history is one squashed snapshot per release; the old main is
-     replaced);
-  4. gh release create <version> porch.tar.gz porch.tar.gz.sha256.
+The public history only grows; nothing is ever force-pushed.
+
+  1. clones the public repo (read-only) and checks that its main is exactly
+     the last release (share/public-release.json) or the last bin/public-pull.
+     Commits made on GitHub since then (a merged pull request) make it refuse:
+     run bin/public-pull, then release again;
+  2. bin/public-export into a temp dir (HEAD only, exclude list, leak scan);
+  3. replaces the public clone's tree with the export; no change = no release;
+  4. builds porch.tar.gz + porch.tar.gz.sha256 FROM THE EXPORT (its own
+     bin/publish-tarball --prefix porch), one top-level porch/ directory;
+  5. ONE normal commit on public main, "Porch vX.Y.Z" + the subjects of the
+     private commits since the last release (private paths and personal
+     markers filtered out), author = the export's (your GitHub noreply
+     address); tags it vX.Y.Z; git push --atomic (main + tag, no force);
+  6. records the release in share/public-release.json and commits that file
+     here (only that file);
+  7. gh release create <version> porch.tar.gz porch.tar.gz.sha256.
 
 site/porch.sh in the public repo downloads
 https://github.com/<repo>/releases/latest/download/porch.tar.gz (+ .sha256).
 
-  --version      default: v0.1.0 when the repo has no release yet, else the
-                 highest vX.Y.Z there with the patch bumped
-  --dry-run      do steps 1-2 locally, print the git/gh commands, run none
-  --yes          required for a real run (it force-pushes main)
+  --version      default: the highest vX.Y.Z among the repo's releases and
+                 tags with the patch bumped (v0.1.0 when there is none)
+  --dry-run      steps 1-4, then show the diff stat, the commit message and the
+                 commands; nothing is committed, pushed, recorded or released
+  --yes          required for a real run
   --repo         default Hexidecibel/porch
   --dist DIR     where the tarball lands (default
                  ~/.local/share/porch/release/<version>)
-  --remote URL   push URL (default https://github.com/<repo>.git)
+  --remote URL   fetch/push URL (default https://github.com/<repo>.git)
 
-Exit: 0 ok, 1 a step failed, 2 usage (or a real run without --yes).
+Exit: 0 ok (or nothing to release), 1 a step failed or refused, 2 usage (or a
+real run without --yes).
 """
 
 import argparse
+import importlib.machinery
+import importlib.util
 import os
 import re
 import shutil
@@ -39,6 +52,9 @@ import tarfile
 import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+import public_sync as ps  # noqa: E402
+
 DEFAULT_REPO = "Hexidecibel/porch"
 TARBALL = "porch.tar.gz"
 PREFIX = "porch"
@@ -46,8 +62,9 @@ VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 # Files that must be in the release tarball (relative to porch/).
 REQUIRED = ("bin/porch", "site/porch.sh", "lib/porch_config.py", "bin/publish-tarball")
 # Never in a release, whatever the exclude list says.
-PRIVATE = ("CLAUDE.md", "todo.md", "lessons.md", "share/public-export-markers.txt")
-
+PRIVATE = ("CLAUDE.md", "todo.md", "lessons.md", "share/public-export-markers.txt",
+           ps.RECORD)
+MAX_CHANGES = 150
 
 class ReleaseError(Exception):
     pass
@@ -142,13 +159,131 @@ def check_installer(export_dir, repo):
             say(f"! warning: site/porch.sh does not default to {want}")
 
 
-def notes_text(version, repo, sha):
+
+
+def load_export_module():
+    """bin/public-export as a module (its scan rules and marker reader)."""
+    path = os.path.join(REPO_ROOT, "bin", "public-export")
+    loader = importlib.machinery.SourceFileLoader("porch_public_export", path)
+    spec = importlib.util.spec_from_loader("porch_public_export", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def source_excludes(source):
+    """share/public-exclude.txt at the source's HEAD, plus the release record."""
+    p = ps.git("show", "HEAD:share/public-exclude.txt", cwd=source, check=False)
+    out = [ps.RECORD]
+    for ln in (p.stdout if p.returncode == 0 else "").splitlines():
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            out.append(ln.lstrip("/"))
+    return out
+
+
+def _excluded(rel, excludes):
+    import fnmatch
+    for e in excludes:
+        if e.endswith("/"):
+            if rel.startswith(e):
+                return True
+        elif rel == e or fnmatch.fnmatchcase(rel, e):
+            return True
+    return False
+
+
+def _mentions_private(subject, excludes):
+    low = subject.lower()
+    for e in excludes:
+        e = e.rstrip("/").lower()
+        if any(ch in e for ch in "*?["):
+            continue
+        if e and (e in low or os.path.basename(e) in low):
+            return True
+    return False
+
+
+def subject_hits(text, rules):
+    """Names of the scan rules (personal markers, token shapes) text trips."""
+    return [name for name, rx, _skip in rules if rx.search(text)]
+
+
+def changelog(source, since, head, excludes, rules, skip_subjects=()):
+    """Subjects of the non-merge private commits in since..head, oldest first,
+    minus: commits that touch only private paths, subjects that name a
+    private path, subjects that trip the export's scan (personal markers,
+    token shapes), and subjects already on public main (bin/public-pull
+    imports). Returns (lines, dropped_count)."""
+    rng = f"{since}..{head}" if since else head
+    out = ps.git("log", "--reverse", "--no-merges", "--format=%x00%s", "--name-only", rng,
+                 cwd=source).stdout
+    lines, dropped, skip = [], 0, set(skip_subjects)
+    for chunk in out.split("\0")[1:]:
+        parts = chunk.split("\n")
+        subject = parts[0].strip()
+        files = [f for f in parts[1:] if f.strip()]
+        if files and all(_excluded(f, excludes) for f in files):
+            continue                        # private-only commit
+        if subject in skip:
+            continue                        # came from the public repo
+        if not subject or _mentions_private(subject, excludes) or subject_hits(subject, rules):
+            dropped += 1
+            continue
+        lines.append(subject)
+    return lines, dropped
+
+
+def commit_message(version, prev, lines):
+    msg = [f"Porch {version}", ""]
+    msg.append(f"Changes since {prev}:" if prev else "First public release.")
+    if prev:
+        shown = lines[:MAX_CHANGES]
+        msg += [f"- {s}" for s in shown] or ["- maintenance"]
+        if len(lines) > len(shown):
+            msg.append(f"- ... and {len(lines) - len(shown)} more")
+    return "\n".join(msg) + "\n"
+
+
+def replace_tree(pub, exp):
+    """Make pub's working tree exactly the export's files, stage everything.
+    Returns True when the staged tree differs from HEAD (or there is no HEAD)."""
+    for name in os.listdir(pub):
+        if name == ".git":
+            continue
+        path = os.path.join(pub, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+    files = ps.git("ls-files", "-z", cwd=exp).stdout.split("\0")
+    files = [f for f in files if f]
+    for rel in files:
+        src, dst = os.path.join(exp, rel), os.path.join(pub, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.islink(src):
+            os.symlink(os.readlink(src), dst)
+        else:
+            shutil.copy2(src, dst)
+    ps.git("add", "-A", "-f", ".", cwd=pub)
+    staged = set(f for f in ps.git("ls-files", "-z", cwd=pub).stdout.split("\0") if f)
+    if staged != set(files):
+        raise ReleaseError("the public tree does not match the export after staging")
+    if ps.git("rev-parse", "--verify", "-q", "HEAD", cwd=pub, check=False).returncode != 0:
+        return True
+    return ps.git("diff", "--cached", "--quiet", cwd=pub, check=False).returncode != 0
+
+
+def notes_text(version, repo, sha, lines=(), prev=None):
     raw = f"https://raw.githubusercontent.com/{repo}/main/site/porch.sh"
-    return (f"Porch {version}.\n\n"
-            "Install on a fresh Ubuntu 22.04/24.04 or Debian 12/13 server:\n\n"
+    out = f"Porch {version}.\n\n"
+    if prev and lines:
+        out += f"Changes since {prev}:\n\n" + "".join(f"- {s}\n" for s in lines[:MAX_CHANGES]) + "\n"
+    out += ("Install on a fresh Ubuntu 22.04/24.04 or Debian 12/13 server:\n\n"
             f"    curl -sSL {raw} | sudo sh -s -- --check   # read-only report first\n"
             f"    curl -sSL {raw} | sudo sh\n\n"
             f"`{TARBALL}` sha256: `{sha}`\n")
+    return out
 
 
 def main(argv=None):
@@ -173,8 +308,31 @@ def main(argv=None):
     if args.version and not VERSION_RE.match(args.version):
         p.error(f"--version must look like v1.2.3: {args.version}")
     remote = args.remote or f"https://github.com/{args.repo}.git"
+    source = os.path.realpath(args.source)
 
+    work = tempfile.mkdtemp(prefix="porch-release-")
     try:
+        rec = ps.read_record(source)
+        if not args.dry_run and ps.record_dirty(source):
+            raise ReleaseError(f"{ps.RECORD} has uncommitted changes")
+
+        # 1. the public repo, as it is now
+        pub = os.path.join(work, "public")
+        say(f"→ fetching {remote} (read-only)")
+        main_sha = ps.clone_public(remote, pub)
+        ps.check_public_state(pub, main_sha, rec)
+        if rec:
+            tag = ps.git("rev-parse", "-q", "--verify", f"refs/tags/{rec['version']}^{{commit}}",
+                         cwd=pub, check=False).stdout.strip()
+            if tag != rec["public_commit"]:
+                say(f"! warning: public tag {rec['version']} is not at the recorded public commit "
+                    f"{rec['public_commit'][:12]}")
+            say(f"  public main {main_sha[:12]} = last release {rec['version']}"
+                + (f" + public-pull up to {rec['public_synced'][:12]}" if rec.get("public_synced") else ""))
+        else:
+            say("  the public repo is empty: this is the first release")
+
+        public_tags = [t for t in ps.git("tag", "-l", cwd=pub).stdout.split() if t]
         if args.version:
             version = args.version
         else:
@@ -183,75 +341,137 @@ def main(argv=None):
             except ReleaseError as e:
                 if not args.dry_run:
                     raise
-                say(f"! could not list releases ({e}); assuming none")
+                say(f"! could not list releases ({e}); using the public tags only")
                 tags = []
-            version = next_version(tags)
-            if version in tags:
-                raise ReleaseError(f"{version} already exists")
+            version = next_version(tags + public_tags + ([rec["version"]] if rec else []))
+        if version in public_tags:
+            raise ReleaseError(f"{version} already exists in the public repo")
         say(f"→ release {version} of {args.repo}" + (" (dry run)" if args.dry_run else ""))
 
-        dirty = run(["git", "-C", args.source, "status", "--porcelain", "--untracked-files=no"]).stdout
+        dirty = run(["git", "-C", source, "status", "--porcelain", "--untracked-files=no"]).stdout
         if dirty.strip():
             say("! the working tree has uncommitted changes: the release is built from HEAD only")
+        head = ps.git("rev-parse", "HEAD", cwd=source).stdout.strip()
 
+        # 2-3. export, then lay it over public main
+        exp = os.path.join(work, "porch")
+        say("→ exporting the public tree (bin/public-export)")
+        export(exp, args)
+        check_installer(exp, args.repo)
+        if main_sha:
+            ps.git("checkout", "-q", "-B", "main", main_sha, cwd=pub)
+        else:
+            ps.git("checkout", "-q", "--orphan", "main", cwd=pub)
+        if not replace_tree(pub, exp):
+            say(f"\n✓ nothing changed since {rec['version'] if rec else 'the last release'}: "
+                "the export matches public main; no release")
+            return 0
+        if main_sha:
+            stat = ps.git("diff", "--cached", "--stat=100", "HEAD", cwd=pub).stdout
+        else:
+            stat = f" {len(ps.git('ls-files', cwd=pub).stdout.splitlines())} files (first commit)\n"
+
+        # changelog, filtered through the export's own scan
+        exmod = load_export_module()
+        markers = exmod.read_markers(source) or []
+        rules = exmod.marker_rules(markers) + exmod.RULES
+        excludes = source_excludes(source)
+        skip = []
+        if rec and rec.get("public_synced"):
+            skip = ps.commits_between(pub, rec["public_commit"], rec["public_synced"], fmt="%s")
+        if rec and not ps.has_commit(source, rec["private_commit"]):
+            raise ReleaseError(f"private commit {rec['private_commit'][:12]} from {ps.RECORD} "
+                               "is not in this repo")
+        lines, dropped = changelog(source, rec["private_commit"] if rec else None, head,
+                                   excludes, rules, skip)
+        prev = rec["version"] if rec else None
+        message = commit_message(version, prev, lines)
+        if subject_hits(message, rules) or _mentions_private_lines(lines, excludes):
+            raise ReleaseError("the commit message trips the export's scan; refusing")
+
+        # 4. tarball
         dist = os.path.abspath(os.path.expanduser(
             args.dist or os.path.join("~", ".local", "share", "porch", "release", version)))
-        work = tempfile.mkdtemp(prefix="porch-release-")
-        try:
-            exp = os.path.join(work, "porch")
-            say("→ exporting the public tree (bin/public-export)")
-            export(exp, args)
-            check_installer(exp, args.repo)
-            say("→ building the release tarball from the export")
-            for old in (TARBALL, TARBALL + ".sha256"):
-                if os.path.exists(os.path.join(dist, old)):
-                    os.unlink(os.path.join(dist, old))
-            tgz = build_tarball(exp, dist)
-            with open(tgz + ".sha256", encoding="utf-8") as f:
-                sha = f.read().split()[0]
-            head = run(["git", "-C", exp, "log", "-1", "--format=%h %s"]).stdout.strip()
+        say("→ building the release tarball from the export")
+        for old in (TARBALL, TARBALL + ".sha256"):
+            if os.path.exists(os.path.join(dist, old)):
+                os.unlink(os.path.join(dist, old))
+        tgz = build_tarball(exp, dist)
+        with open(tgz + ".sha256", encoding="utf-8") as f:
+            sha = f.read().split()[0]
 
-            if args.notes_file:
-                notes = ["--notes-file", os.path.abspath(args.notes_file)]
-            else:
-                notes = ["--notes", args.notes or notes_text(version, args.repo, sha)]
-            push = ["git", "-C", exp, "push", "--force", remote, "HEAD:refs/heads/main"]
-            release = ["gh", "release", "create", version, tgz, tgz + ".sha256",
-                       "--repo", args.repo, "--target", "main", "--title", f"Porch {version}", *notes]
+        an = ps.git("log", "-1", "--format=%an", cwd=exp).stdout.strip()
+        ae = ps.git("log", "-1", "--format=%ae", cwd=exp).stdout.strip()
+        if args.notes_file:
+            notes = ["--notes-file", os.path.abspath(args.notes_file)]
+        else:
+            notes = ["--notes", args.notes or notes_text(version, args.repo, sha, lines, prev)]
+        commit = ["git", "-C", pub, "commit", "-F", "<message>"]
+        tagc = ["git", "-C", pub, "tag", version]
+        push = ["git", "-C", pub, "push", "--atomic", remote, "HEAD:refs/heads/main",
+                f"refs/tags/{version}:refs/tags/{version}"]
+        recordc = ["git", "-C", source, "commit", "--only", "-m", f"Release {version}", "--", ps.RECORD]
+        release = ["gh", "release", "create", version, tgz, tgz + ".sha256",
+                   "--repo", args.repo, "--verify-tag", "--title", f"Porch {version}", *notes]
 
-            say("")
-            say(f"Tarball:  {tgz}")
-            say(f"sha256:   {sha}")
-            say(f"Export:   {head}")
-            say("")
-            say(f"This replaces {args.repo}'s main with ONE fresh commit (a force-push: the")
-            say("previous public history is dropped), then publishes the release:")
-            say("  " + " ".join(_q(c) for c in push))
-            say("  " + " ".join(_q(c) for c in release))
-            if not args.notes_file:
-                say("Release notes:")
-                for ln in notes[1].splitlines():
-                    say("  | " + ln)
-            if args.dry_run:
-                say("\n✓ dry run: nothing pushed, no release created")
-                return 0
-            if not args.yes:
-                say("\nRe-run with --yes to do it.")
-                return 2
-            for cmd in (push, release):
-                say(f"→ {cmd[0]} {cmd[1] if cmd[0] == 'gh' else cmd[3]} ...")
-                r = run(cmd, timeout=900)
-                sys.stdout.write(r.stdout)
-                sys.stderr.write(r.stderr)
-                if r.returncode != 0:
-                    raise ReleaseError(f"{cmd[0]} failed (exit {r.returncode})")
-            say(f"✓ released {version}: https://github.com/{args.repo}/releases/tag/{version}")
+        say("")
+        say(f"Tarball:  {tgz}")
+        say(f"sha256:   {sha}")
+        say(f"Author:   {an} <{ae}>")
+        say(f"Base:     public main {main_sha[:12] if main_sha else '(none)'}")
+        say("Diff:")
+        for ln in stat.rstrip("\n").splitlines():
+            say("  " + ln)
+        say(f"Commit message ({len(lines)} change(s) listed"
+            + (f", {dropped} private subject(s) left out" if dropped else "") + "):")
+        for ln in message.rstrip("\n").splitlines():
+            say("  | " + ln)
+        say("")
+        say(f"This adds ONE commit on top of {args.repo}'s main (no force-push), tags it,")
+        say(f"records it in {ps.RECORD} here, then publishes the release:")
+        for c in (commit, tagc, push, recordc, release):
+            say("  " + " ".join(_q(x) for x in c))
+        if args.dry_run:
+            say("\n✓ dry run: nothing committed, pushed, recorded or released")
             return 0
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
-    except ReleaseError as e:
+        if not args.yes:
+            say("\nRe-run with --yes to do it.")
+            return 2
+
+        env = ps.clean_env({"GIT_AUTHOR_NAME": an, "GIT_AUTHOR_EMAIL": ae,
+                            "GIT_COMMITTER_NAME": an, "GIT_COMMITTER_EMAIL": ae})
+        ps.git("-c", "commit.gpgsign=false", "commit", "-q", "-m", message, cwd=pub, env=env)
+        ps.git("-c", "tag.gpgsign=false", "tag", version, cwd=pub, env=env)
+        new_public = ps.git("rev-parse", "HEAD", cwd=pub).stdout.strip()
+        say(f"→ git push --atomic {remote} main {version}")
+        r = run(push[:1] + push[3:], cwd=pub, env=ps.clean_env(), timeout=900)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        if r.returncode != 0:
+            raise ReleaseError(f"git push failed (exit {r.returncode}); nothing was released. "
+                               "If public main moved meanwhile, run bin/public-pull and retry.")
+        ps.write_record(source, {"version": version, "public_commit": new_public,
+                                 "private_commit": head})
+        rc = ps.commit_record(source, f"Release {version} (public {new_public[:12]})")
+        say(f"→ recorded {version} in {ps.RECORD} ({rc[:12]})")
+        say(f"→ gh release create {version} ...")
+        r = run(release, timeout=900)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        if r.returncode != 0:
+            raise ReleaseError(f"gh release create failed (exit {r.returncode}); main and the tag "
+                               "are pushed: re-run that command by hand")
+        say(f"✓ released {version}: https://github.com/{args.repo}/releases/tag/{version}")
+        return 0
+    except (ReleaseError, ps.SyncError) as e:
         print(f"release: {e}", file=sys.stderr)
         return 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _mentions_private_lines(lines, excludes):
+    return any(_mentions_private(s, excludes) for s in lines)
 
 
 def _q(s):

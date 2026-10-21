@@ -43,8 +43,10 @@ home's public address, plus 80, 443, 7000 and the relay's control port.
   and `porch-e2e relay-test --relay-provider vultr` exists, but the test key
   was refused (HTTP 401) from the throwaway home server while it works from
   the author's own address: Vultr keys carry an IP **Access Control** list.
-  Porch now says so when it happens. Allow your home's address (or all
-  IPv4) under Account > API before choosing Vultr.
+  Porch now says so when it happens, quoting Vultr's reason ("Unauthorized
+  IP address: ..."). Under Account > API, allow your home's addresses, or
+  turn on both **Any IPv4** and **Any IPv6**: a box with IPv6 calls the API
+  over IPv6, so allowing IPv4 alone is not enough.
 
 ## You need
 

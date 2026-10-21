@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""bin/public-pull: bring commits made on the public repo back into this one.
+
+Usage: bin/public-pull [--dry-run] [--repo OWNER/NAME] [--remote URL]
+       bin/public-pull --continue | --abort
+
+Pull requests are merged on GitHub (github.com/<repo>). Before the next
+bin/release, this fetches public main, takes the commits after the last one
+this repo has (share/public-release.json: public_synced, else the release's
+public_commit), and applies them here as patches with `git format-patch` +
+`git am --3way`. The public repo maps files 1:1 to this one, so the paths are
+the same; each commit keeps its author (you become the committer). Merge
+commits are skipped (their changes come with the commits they merged).
+
+When every patch applies, it records public main as `public_synced` in
+share/public-release.json and commits that file, so bin/release accepts
+public main as it is. On a conflict it stops with `git am` in progress:
+resolve the files, `git add` them, then `bin/public-pull --continue` (or
+`--abort` to undo the whole pull; `git am --skip` drops one patch).
+
+  --dry-run   list the commits and the command, apply nothing
+  --repo      default Hexidecibel/porch
+  --remote    fetch URL (default https://github.com/<repo>.git)
+
+Exit: 0 ok (or already up to date), 1 refused or failed (conflicts included),
+2 usage.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+import public_sync as ps  # noqa: E402
+
+DEFAULT_REPO = "Hexidecibel/porch"
+PENDING = "porch-public-pull.json"
+
+
+def say(msg=""):
+    print(msg, flush=True)
+
+
+def git_dir(source):
+    d = ps.git("rev-parse", "--git-dir", cwd=source).stdout.strip()
+    return d if os.path.isabs(d) else os.path.join(source, d)
+
+
+def am_in_progress(source):
+    return os.path.isdir(os.path.join(git_dir(source), "rebase-apply"))
+
+
+def pending_path(source):
+    return os.path.join(git_dir(source), PENDING)
+
+
+def read_pending(source):
+    try:
+        with open(pending_path(source), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def finish(source, target, remote):
+    rec = ps.read_record(source)
+    if rec is None:
+        raise ps.SyncError(f"{ps.RECORD} is gone")
+    rec["public_synced"] = target
+    ps.write_record(source, rec)
+    sha = ps.commit_record(source, f"public-pull: synced public main {target[:12]}")
+    try:
+        os.unlink(pending_path(source))
+    except FileNotFoundError:
+        pass
+    say(f"✓ synced with public main {target[:12]} (recorded in {ps.RECORD}, {sha[:12]})")
+    say("  next: run the tests, then bin/release")
+
+
+def conflict_help(out):
+    for ln in out.strip().splitlines()[-15:]:
+        say("  " + ln)
+    say("")
+    say("A patch did not apply cleanly; `git am` is stopped mid-way. To go on:")
+    say("  git status                      # the conflicted files")
+    say("  (edit them) && git add <files>")
+    say("  bin/public-pull --continue      # finishes git am, then records the sync")
+    say("Or: git am --skip (drop this one patch), bin/public-pull --abort (undo the pull).")
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="bin/public-pull",
+                                description="Apply commits made on the public repo here.")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--repo", default=DEFAULT_REPO)
+    p.add_argument("--remote")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--continue", dest="cont", action="store_true")
+    g.add_argument("--abort", action="store_true")
+    p.add_argument("--source", default=REPO_ROOT, help=argparse.SUPPRESS)   # tests
+    args = p.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo):
+        p.error(f"--repo must be OWNER/NAME: {args.repo}")
+    remote = args.remote or f"https://github.com/{args.repo}.git"
+    source = os.path.realpath(args.source)
+    env = ps.clean_env()
+    for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE"):
+        env.pop(k, None)          # git am keeps each patch's own author
+
+    try:
+        pend = read_pending(source)
+        if args.abort:
+            if am_in_progress(source):
+                ps.git("am", "--abort", cwd=source, env=env)
+            if pend:
+                os.unlink(pending_path(source))
+            say("✓ public-pull aborted; nothing recorded")
+            return 0
+        if args.cont:
+            if not pend:
+                raise ps.SyncError("no public-pull in progress")
+            if am_in_progress(source):
+                r = subprocess.run(["git", "am", "--continue"], cwd=source, env=env,
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    conflict_help(r.stdout + r.stderr)
+                    return 1
+            finish(source, pend["target"], remote)
+            return 0
+
+        if pend or am_in_progress(source):
+            raise ps.SyncError("a git am / public-pull is in progress: "
+                               "bin/public-pull --continue or --abort first")
+        rec = ps.read_record(source)
+        if rec is None:
+            raise ps.SyncError(f"no {ps.RECORD}: there is no release to sync from")
+        if ps.git("status", "--porcelain", "--untracked-files=no", cwd=source).stdout.strip():
+            raise ps.SyncError("the working tree has uncommitted changes; commit or stash them first")
+
+        work = tempfile.mkdtemp(prefix="porch-public-pull-")
+        try:
+            pub = os.path.join(work, "public")
+            say(f"→ fetching {remote} (read-only)")
+            main_sha = ps.clone_public(remote, pub)
+            if main_sha is None:
+                raise ps.SyncError("the public repo has no main")
+            base = ps.synced_commit(rec)
+            if not ps.has_commit(pub, base):
+                raise ps.SyncError(f"public commit {base[:12]} is not in the public repo")
+            if main_sha == base:
+                say(f"✓ already up to date with public main {main_sha[:12]}")
+                return 0
+            if not ps.is_ancestor(pub, base, main_sha):
+                raise ps.SyncError(f"public main no longer contains {base[:12]} (history rewritten?)")
+            commits = ps.commits_between(pub, base, main_sha, fmt="%H%x09%an <%ae>%x09%s")
+            touched = ps.git("diff", "--name-only", base, main_sha, cwd=pub).stdout.split("\n")
+            if ps.RECORD in touched:
+                raise ps.SyncError(f"the public commits touch {ps.RECORD}; refusing")
+            say(f"  {len(commits)} commit(s) on public main after {base[:12]}:")
+            for c in commits:
+                sha, who, subj = c.split("\t", 2)
+                say(f"    {sha[:10]}  {subj}  ({who})")
+            patches = os.path.join(work, "patches")
+            if commits:
+                ps.git("format-patch", "-q", "--no-merges", "-o", patches,
+                       f"{base}..{main_sha}", cwd=pub)
+                files = sorted(os.path.join(patches, f) for f in os.listdir(patches))
+            else:
+                files = []
+            say(f"  then: git am --3way <{len(files)} patch(es)>, and record public_synced = "
+                f"{main_sha[:12]} in {ps.RECORD}")
+            if args.dry_run:
+                say("✓ dry run: nothing applied")
+                return 0
+            with open(pending_path(source), "w", encoding="utf-8") as f:
+                json.dump({"target": main_sha, "base": base}, f)
+            if files:
+                say("→ git am --3way")
+                r = subprocess.run(["git", "am", "--3way", *files], cwd=source, env=env,
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    conflict_help(r.stdout + r.stderr)
+                    return 1
+            finish(source, main_sha, remote)
+            return 0
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    except ps.SyncError as e:
+        print(f"public-pull: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

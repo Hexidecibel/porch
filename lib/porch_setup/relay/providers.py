@@ -69,7 +69,15 @@ class Provider:
         if status not in ok:
             msg = (raw or b"").decode("utf-8", "replace")[:300]
             if status in (401, 403):
-                msg = self.refused
+                # Keep the provider's own reason when it names one (Vultr:
+                # "Unauthorized IP address: <ip>", e.g. an IPv6 address the
+                # key's access list does not allow).
+                why = ""
+                try:
+                    why = str(json.loads(raw or b"{}").get("error") or "")[:160]
+                except (ValueError, AttributeError):
+                    pass
+                msg = self.refused + (f" (the provider said: {why})" if why else "")
             raise ProviderError(self._scrub(f"{self.title} {method} {path.split('?')[0]}: HTTP {status}: {msg}"))
         if not raw:
             return {}

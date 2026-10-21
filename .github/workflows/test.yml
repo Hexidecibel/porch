@@ -1,0 +1,27 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install optional test dependencies
+        # Everything is optional: tests that need a missing tool skip.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            python3-cryptography python3-pil python3-qrcode \
+            ffmpeg dash openssl haproxy
+      - name: Run the test suite
+        # the apt modules live in the system python3
+        run: PATH="/usr/bin:$PATH" bash -c "python3 --version && bin/test"

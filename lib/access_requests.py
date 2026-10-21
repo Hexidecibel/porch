@@ -63,6 +63,14 @@ class Refused(Exception):
         self.status = status
 
 
+def _new_id():
+    """A request id that never starts with "-" (a CLI would read it as an option)."""
+    while True:
+        rid = secrets.token_urlsafe(12)
+        if not rid.startswith('-'):
+            return rid
+
+
 def valid_id(rid):
     return isinstance(rid, str) and bool(_ID_RE.match(rid))
 
@@ -123,7 +131,7 @@ class Store:
                     return r['id'], token, dict(r), True
             if sum(1 for r in self.recs if self._live(r, now)) >= MAX_PENDING:
                 raise Refused('Too many open requests right now; try again later', 503)
-            rec = {'id': secrets.token_urlsafe(12), 'host': host, 'note': clean_note(note),
+            rec = {'id': _new_id(), 'host': host, 'note': clean_note(note),
                    'ip': ip, 'created': now, 'real': bool(real),
                    'kind': kind if kind in KINDS else 'stranger',
                    'device_id': device_id, 'device_name': (device_name or '')[:64] or None,

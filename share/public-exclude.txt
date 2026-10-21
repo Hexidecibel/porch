@@ -11,3 +11,7 @@ CLAUDE.md
 
 # The personal-marker list bin/public-export scans for (private by nature)
 share/public-export-markers.txt
+
+# The release record (private commit ids; bin/release and bin/public-pull
+# keep it here, the public repo has the tags instead)
+share/public-release.json

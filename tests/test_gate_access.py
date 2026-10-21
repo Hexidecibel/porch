@@ -405,5 +405,18 @@ class StoreUnitTest(unittest.TestCase):
                          "approved")
 
 
+class RequestIdTest(unittest.TestCase):
+    def test_ids_never_start_with_a_dash(self):
+        # `auth-admin access deny <id>` would read "-abc..." as an option
+        import reopen_requests
+        from unittest import mock
+        for mod in (access_requests, reopen_requests):
+            seq = iter(["-dashfirst000000", "okid000000000000"])
+            with mock.patch.object(mod.secrets, "token_urlsafe", lambda n: next(seq)):
+                rid = mod._new_id()
+            self.assertEqual(rid, "okid000000000000")
+            self.assertTrue(mod.valid_id(rid))
+
+
 if __name__ == "__main__":
     unittest.main()

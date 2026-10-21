@@ -1,5 +1,7 @@
 # Security model
 
+Found a vulnerability? Report it privately: see [SECURITY.md](../SECURITY.md).
+
 - **The one-line installer creates a `porch` user with passwordless sudo.**
   `site/porch.sh` writes `/etc/sudoers.d/90-porch` (`porch ALL=(ALL)
   NOPASSWD:ALL`, checked with `visudo -cf`; the account has no password).

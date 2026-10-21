@@ -125,16 +125,16 @@ def hero():
         + t(84, 150, "SELF-HOSTED  ·  BRING YOUR OWN DOMAIN", "m", 15, LIGHT, extra='letter-spacing="2.5"')
         + t(78, 296, "Porch", "d", 168, TEXT, extra='letter-spacing="-6"')
         + t(84, 364, "Leave the light on.", "d", 40, TEXT, extra='letter-spacing="-1"')
-        + t(84, 410, "Anything on your machine, one command from", "u", 22, MUTED)
-        + t(84, 440, "a real HTTPS link on your own domain.", "u", 22, MUTED)
+        + t(84, 410, "Share files, collect photos, take secrets", "u", 22, MUTED)
+        + t(84, 440, "and let people in. Your box, your domain.", "u", 22, MUTED)
         + f'<rect x="84" y="476" width="378" height="44" rx="12" fill="{SURFACE}" stroke="{LIGHT}" stroke-opacity=".35"/>'
         + t(104, 504, "$", "m", 17, LIGHT) + t(124, 504, "porch tunnel 3000 demo", "m", 17, TEXT)
         + f'<rect x="352" y="489" width="10" height="20" fill="{LIGHT}"><animate attributeName="opacity" '
           'values="1;1;0;0" dur="1.1s" repeatCount="indefinite"/></rect>'
         + f'</g><rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="24" fill="none" stroke="{TEXT}" stroke-opacity=".08"/>'
     )
-    return svg(W, H, body, "Porch: leave the light on. Anything on your machine, one command "
-                            "from a real HTTPS link on your own domain.")
+    return svg(W, H, body, "Porch: leave the light on. Share files, collect photos, take secrets "
+                            "and let people in. Your box, your domain.")
 
 
 # ---- terminal --------------------------------------------------------------

@@ -231,6 +231,14 @@ class ProviderTest(unittest.TestCase):
         self.assertIn("refused", str(cm.exception))
         self.assertNotIn("wrong-", str(cm.exception))
 
+    def test_refusal_keeps_the_providers_reason(self):
+        def api(method, url, headers, data):
+            return 401, b'{"error":"Unauthorized IP address: 2001:db8::1","status":401}'
+        with self.assertRaises(prov.ProviderError) as cm:
+            prov.Vultr(TOKEN, http=api).check()
+        self.assertIn("Unauthorized IP address: 2001:db8::1", str(cm.exception))
+        self.assertNotIn(TOKEN, str(cm.exception))
+
     def test_vultr_refusal_names_the_access_list(self):
         v = prov.Vultr("k-" + TOKEN, http=lambda m, u, h, b: (401, b'{"error":"Unauthorized IP address"}'))
         with self.assertRaises(prov.ProviderError) as cm:
